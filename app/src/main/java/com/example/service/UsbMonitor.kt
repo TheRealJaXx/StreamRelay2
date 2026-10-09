@@ -85,12 +85,16 @@ class UsbMonitor(
                 addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
                 addAction(ACTION_USB_PERMISSION)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                context.registerReceiver(usbReceiver, filter)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    context.registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
+                } else {
+                    context.registerReceiver(usbReceiver, filter)
+                }
+                receiverRegistered = true
+            } catch (e: Exception) {
+                onLog("USB", "Failed to register USB receiver: ${e.message}", true)
             }
-            receiverRegistered = true
         }
         scanDevices()
     }
@@ -163,28 +167,39 @@ class UsbMonitor(
     }
 
     fun requestUsbPermission(vendorId: Int, productId: Int) {
-        val manager = usbManager ?: return
-        val target = manager.deviceList.values.firstOrNull {
-            it.vendorId == vendorId && it.productId == productId
-        } ?: run {
-            onLog("USB", "Device not found for permission request: $vendorId:$productId", true)
-            return
+        try {
+            val manager = usbManager ?: run {
+                onLog("USB", "UsbManager is not available", true)
+                return
+            }
+            val target = manager.deviceList.values.firstOrNull {
+                it.vendorId == vendorId && it.productId == productId
+            } ?: run {
+                onLog("USB", "Device not found for permission request: $vendorId:$productId", true)
+                return
+            }
+
+            val intent = Intent(ACTION_USB_PERMISSION).apply {
+                setPackage(context.packageName)
+            }
+
+            val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+
+            val permissionIntent = PendingIntent.getBroadcast(
+                context,
+                0,
+                intent,
+                flags
+            )
+
+            onLog("USB", "Requesting USB system permission for ${target.productName ?: target.deviceName}...", false)
+            manager.requestPermission(target, permissionIntent)
+        } catch (e: Exception) {
+            onLog("USB", "Error requesting USB permission: ${e.message}", true)
         }
-
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-
-        val permissionIntent = PendingIntent.getBroadcast(
-            context,
-            0,
-            Intent(ACTION_USB_PERMISSION),
-            flags
-        )
-
-        onLog("USB", "Requesting USB system permission for ${target.productName ?: target.deviceName}...", false)
-        manager.requestPermission(target, permissionIntent)
     }
 }
