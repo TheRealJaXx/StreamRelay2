@@ -7,6 +7,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -27,6 +29,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
@@ -36,6 +39,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -61,6 +66,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.model.CaptureTelemetry
 import com.example.model.LogEntry
+import com.example.model.StreamPreset
 import com.example.model.UsbDeviceInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,6 +78,7 @@ fun CaptureScreen(
     val usbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
     val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val selectedPreset by viewModel.selectedPreset.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -87,7 +94,7 @@ fun CaptureScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Milestone 1 · USB UVC Hardware Link",
+                            text = "Milestone 1 · Hardware Video Link",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -129,6 +136,15 @@ fun CaptureScreen(
                     onRequestUsbPermission = { vid, pid ->
                         viewModel.requestUsbPermission(vid, pid)
                     }
+                )
+            }
+
+            // Format & Resolution Selector Card
+            item {
+                StreamPresetSelectorCard(
+                    presets = viewModel.availablePresets,
+                    selectedPreset = selectedPreset,
+                    onSelectPreset = { viewModel.selectPreset(it) }
                 )
             }
 
@@ -320,6 +336,91 @@ private fun UsbDeviceStatusCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun StreamPresetSelectorCard(
+    presets: List<StreamPreset>,
+    selectedPreset: StreamPreset,
+    onSelectPreset: (StreamPreset) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("stream_preset_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Tune,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Capture Resolution & Format",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "MJPEG compresses over USB 2.0 to unlock 60 FPS (YUV uncompressed is hardware-capped at ~6 FPS).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                presets.forEach { preset ->
+                    val isSelected = preset.id == selectedPreset.id
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onSelectPreset(preset) },
+                        label = {
+                            Text(
+                                text = preset.label,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            )
+                        },
+                        leadingIcon = {
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = if (preset.isMjpeg) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                        )
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = selectedPreset.description,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (selectedPreset.isMjpeg) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
@@ -543,7 +644,7 @@ private fun TelemetryHudCard(telemetry: CaptureTelemetry) {
                 )
                 MetricTile(
                     label = "Resolution",
-                    value = if (telemetry.resolutionWidth > 0) "${telemetry.resolutionWidth}p" else "--",
+                    value = if (telemetry.resolutionWidth > 0) "${telemetry.resolutionWidth}x${telemetry.resolutionHeight}" else "--",
                     unit = telemetry.bufferFormat,
                     highlight = telemetry.resolutionWidth > 0,
                     modifier = Modifier.weight(1f)
@@ -569,7 +670,7 @@ private fun TelemetryHudCard(telemetry: CaptureTelemetry) {
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Milestone Verified: Video frames ingesting (${telemetry.totalFrames} frames received).",
+                            text = "Milestone Verified: ${telemetry.bufferFormat} frames ingesting (${telemetry.totalFrames} frames received).",
                             color = Color(0xFF10B981),
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.SemiBold
@@ -607,7 +708,7 @@ private fun MetricTile(
             Spacer(modifier = Modifier.height(4.dp))
             Text(
                 text = value,
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = if (highlight) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
             )

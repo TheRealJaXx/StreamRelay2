@@ -19,20 +19,14 @@ data class UsbDeviceInfo(
         get() = productName ?: (manufacturerName?.let { "$it (Device)" } ?: "USB Device ($formattedVidPid)")
 }
 
-data class CameraDeviceInfo(
+data class StreamPreset(
     val id: String,
-    val isExternal: Boolean,
-    val facingName: String,
-    val supportedSizes: List<Pair<Int, Int>>,
-    val hardwareLevel: String
-) {
-    val displayName: String
-        get() = if (isExternal) {
-            "External UVC Capture Card (Camera $id)"
-        } else {
-            "$facingName Camera (ID $id)"
-        }
-}
+    val label: String,
+    val width: Int,
+    val height: Int,
+    val isMjpeg: Boolean,
+    val description: String
+)
 
 data class CaptureTelemetry(
     val isStreaming: Boolean = false,
