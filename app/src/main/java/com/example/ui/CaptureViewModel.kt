@@ -1,13 +1,11 @@
 package com.example.ui
 
 import android.app.Application
-import android.view.Surface
 import androidx.lifecycle.AndroidViewModel
-import com.example.model.CameraDeviceInfo
 import com.example.model.CaptureTelemetry
 import com.example.model.LogEntry
 import com.example.model.UsbDeviceInfo
-import com.example.service.CaptureEngine
+import com.example.service.UvcCaptureEngine
 import com.example.service.UsbMonitor
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -23,13 +21,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
-    private val _hasCameraPermission = MutableStateFlow(false)
-    val hasCameraPermission: StateFlow<Boolean> = _hasCameraPermission.asStateFlow()
-
-    private val _selectedCameraId = MutableStateFlow<String?>(null)
-    val selectedCameraId: StateFlow<String?> = _selectedCameraId.asStateFlow()
-
-    private var activePreviewSurface: Surface? = null
+    private var activePreviewSurface: Any? = null
 
     private fun addLog(tag: String, message: String, isError: Boolean = false) {
         val entry = LogEntry(
@@ -50,88 +42,41 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         addLog(tag, message, isError)
     }
 
-    private val captureEngine = CaptureEngine(application) { tag, message, isError ->
+    private val uvcCaptureEngine = UvcCaptureEngine(application) { tag, message, isError ->
         addLog(tag, message, isError)
     }
 
     val connectedUsbDevices: StateFlow<List<UsbDeviceInfo>> = usbMonitor.connectedDevices
-    val availableCameras: StateFlow<List<CameraDeviceInfo>> = captureEngine.availableCameras
-    val telemetry: StateFlow<CaptureTelemetry> = captureEngine.telemetry
+    val telemetry: StateFlow<CaptureTelemetry> = uvcCaptureEngine.telemetry
 
     init {
-        addLog("System", "Stream Relay initialized for Milestone 1", false)
+        addLog("System", "Stream Relay initialized for UVC USB Video Capture", false)
         usbMonitor.start()
-        captureEngine.start()
     }
 
-    fun updateCameraPermission(granted: Boolean) {
-        _hasCameraPermission.value = granted
-        if (granted) {
-            addLog("Auth", "Camera permission granted", false)
-            captureEngine.refreshCameraList()
-            autoSelectBestCamera()
-        } else {
-            addLog("Auth", "Camera permission not granted", true)
-        }
-    }
-
-    fun autoSelectBestCamera() {
-        val cameras = availableCameras.value
-        if (cameras.isEmpty()) return
-
-        // Prefer external UVC capture card if present
-        val external = cameras.firstOrNull { it.isExternal }
-        if (external != null) {
-            _selectedCameraId.value = external.id
-            addLog("Select", "Auto-selected External UVC Capture Card (ID ${external.id})", false)
-        } else if (_selectedCameraId.value == null) {
-            _selectedCameraId.value = cameras.first().id
-        }
-    }
-
-    fun selectCamera(id: String) {
-        if (_selectedCameraId.value != id) {
-            _selectedCameraId.value = id
-            val cam = availableCameras.value.firstOrNull { it.id == id }
-            addLog("Select", "Selected ${cam?.displayName ?: "Camera $id"}", false)
-            if (telemetry.value.isStreaming) {
-                // Restart capture on new camera
-                startCapture()
-            }
-        }
-    }
-
-    fun setPreviewSurface(surface: Surface?) {
+    fun setPreviewSurface(surface: Any?) {
         activePreviewSurface = surface
-        captureEngine.setPreviewSurface(surface)
+        uvcCaptureEngine.setPreviewSurface(surface)
     }
 
     fun startCapture() {
-        val id = _selectedCameraId.value ?: availableCameras.value.firstOrNull { it.isExternal }?.id
-            ?: availableCameras.value.firstOrNull()?.id
-        if (id == null) {
-            addLog("Capture", "Cannot start capture: No camera selected or available", true)
+        val uvcDevice = usbMonitor.getFirstUvcDevice()
+        if (uvcDevice == null) {
+            addLog("Capture", "No USB capture card found. Please plug in your UVC device.", true)
             return
         }
 
-        if (!_hasCameraPermission.value) {
-            addLog("Capture", "Cannot start capture: Camera permission required", true)
-            return
-        }
-
-        captureEngine.openCamera(id, activePreviewSurface)
+        uvcCaptureEngine.setPreviewSurface(activePreviewSurface)
+        uvcCaptureEngine.startCapture(uvcDevice)
     }
 
     fun stopCapture() {
-        captureEngine.closeCamera()
-        addLog("Capture", "Capture stopped by user", false)
+        uvcCaptureEngine.stopCapture()
     }
 
     fun refreshAll() {
-        addLog("System", "Refreshing USB and Camera devices...", false)
+        addLog("System", "Refreshing USB devices...", false)
         usbMonitor.scanDevices()
-        captureEngine.refreshCameraList()
-        autoSelectBestCamera()
     }
 
     fun requestUsbPermission(vendorId: Int, productId: Int) {
@@ -145,6 +90,6 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     override fun onCleared() {
         super.onCleared()
         usbMonitor.stop()
-        captureEngine.stop()
+        uvcCaptureEngine.release()
     }
 }

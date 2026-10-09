@@ -202,4 +202,19 @@ class UsbMonitor(
             onLog("USB", "Error requesting USB permission: ${e.message}", true)
         }
     }
+
+    fun getRawDevice(vendorId: Int, productId: Int): UsbDevice? {
+        return usbManager?.deviceList?.values?.firstOrNull {
+            it.vendorId == vendorId && it.productId == productId
+        }
+    }
+
+    fun getFirstUvcDevice(): UsbDevice? {
+        val manager = usbManager ?: return null
+        return manager.deviceList.values.firstOrNull { device ->
+            device.deviceClass == USB_CLASS_VIDEO || (0 until device.interfaceCount).any {
+                device.getInterface(it).interfaceClass == USB_CLASS_VIDEO
+            }
+        } ?: manager.deviceList.values.firstOrNull()
+    }
 }

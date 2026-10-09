@@ -30,16 +30,13 @@ class MainActivity : ComponentActivity() {
       MyApplicationTheme {
         val permissionLauncher = rememberLauncherForActivityResult(
           contract = ActivityResultContracts.RequestPermission()
-        ) { isGranted ->
-          viewModel.updateCameraPermission(isGranted)
-        }
+        ) { _ -> }
 
         LaunchedEffect(Unit) {
           val hasPermission = ContextCompat.checkSelfPermission(
             this@MainActivity,
             Manifest.permission.CAMERA
           ) == PackageManager.PERMISSION_GRANTED
-          viewModel.updateCameraPermission(hasPermission)
 
           if (!hasPermission) {
             permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -47,12 +44,7 @@ class MainActivity : ComponentActivity() {
         }
 
         Surface(modifier = Modifier.fillMaxSize()) {
-          CaptureScreen(
-            viewModel = viewModel,
-            onRequestCameraPermission = {
-              permissionLauncher.launch(Manifest.permission.CAMERA)
-            }
-          )
+          CaptureScreen(viewModel = viewModel)
         }
       }
     }
