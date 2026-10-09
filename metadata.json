@@ -1,0 +1,6 @@
+{
+  "name": "Stream Relay",
+  "description": "Direct low-latency UVC HDMI video capture and relay for Android.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
