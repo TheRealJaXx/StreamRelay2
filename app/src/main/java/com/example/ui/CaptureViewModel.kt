@@ -23,10 +23,9 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
     val availablePresets: List<StreamPreset> = listOf(
-        StreamPreset("mjpeg_720p", "720p MJPEG (60 FPS)", 1280, 720, true, "Recommended for PS3 · 60fps · Low Latency"),
-        StreamPreset("mjpeg_1080p", "1080p MJPEG (30-60 FPS)", 1920, 1080, true, "Full HD · 30-60fps"),
-        StreamPreset("mjpeg_480p", "480p MJPEG (Ultra Fast)", 640, 480, true, "Maximum throughput · Low bandwidth"),
-        StreamPreset("yuv_1080p", "1080p YUV (Slow 6 FPS)", 1920, 1080, false, "Raw Uncompressed · USB 2.0 bottlenecked (~6fps)")
+        StreamPreset("mjpeg_720p", "720p (60 FPS)", 1280, 720, "Recommended for PS3 · 60 FPS · Lowest Latency"),
+        StreamPreset("mjpeg_1080p", "1080p (30-60 FPS)", 1920, 1080, "Full HD · 30-60 FPS"),
+        StreamPreset("mjpeg_480p", "480p (60 FPS)", 640, 480, "Ultra Fast · Lowest Bandwidth")
     )
 
     private val _selectedPreset = MutableStateFlow(availablePresets[0])
@@ -61,7 +60,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val telemetry: StateFlow<CaptureTelemetry> = uvcCaptureEngine.telemetry
 
     init {
-        addLog("System", "Stream Relay initialized (Default: 720p MJPEG 60fps)", false)
+        addLog("System", "Stream Relay initialized (Hardware MJPEG Engine)", false)
         uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
         usbMonitor.start()
     }

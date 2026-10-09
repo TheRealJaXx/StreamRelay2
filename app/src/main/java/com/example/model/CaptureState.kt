@@ -24,7 +24,6 @@ data class StreamPreset(
     val label: String,
     val width: Int,
     val height: Int,
-    val isMjpeg: Boolean,
     val description: String
 )
 
@@ -35,7 +34,7 @@ data class CaptureTelemetry(
     val resolutionHeight: Int = 0,
     val fps: Float = 0f,
     val totalFrames: Long = 0L,
-    val bufferFormat: String = "None",
+    val bufferFormat: String = "MJPEG Only",
     val lastFrameTimeMs: Long = 0L,
     val lastFrameSizeBytes: Int = 0,
     val streamDurationSeconds: Long = 0L,

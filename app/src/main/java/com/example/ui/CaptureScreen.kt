@@ -7,8 +7,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -40,7 +38,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -139,9 +136,9 @@ fun CaptureScreen(
                 )
             }
 
-            // Format & Resolution Selector Card
+            // Dedicated Hardware MJPEG Resolution Selector
             item {
-                StreamPresetSelectorCard(
+                MjpegPresetSelectorCard(
                     presets = viewModel.availablePresets,
                     selectedPreset = selectedPreset,
                     onSelectPreset = { viewModel.selectPreset(it) }
@@ -217,7 +214,7 @@ private fun MilestoneHeaderCard() {
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Direct hardware capture from MacroSilicon UVC card",
+                    text = "Strictly Hardware MJPEG · Uncompressed YUV Disabled",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -305,20 +302,10 @@ private fun UsbDeviceStatusCard(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    text = "Hardware ID: ${usbDevice.formattedVidPid} · ${usbDevice.interfaceCount} interfaces",
+                    text = "Hardware ID: ${usbDevice.formattedVidPid} · MacroSilicon MS2109",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
-                if (usbDevice.interfacesSummary.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = usbDevice.interfacesSummary.take(2).joinToString(" | "),
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
 
                 if (!usbDevice.hasPermission) {
                     Spacer(modifier = Modifier.height(10.dp))
@@ -340,9 +327,8 @@ private fun UsbDeviceStatusCard(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun StreamPresetSelectorCard(
+private fun MjpegPresetSelectorCard(
     presets: List<StreamPreset>,
     selectedPreset: StreamPreset,
     onSelectPreset: (StreamPreset) -> Unit
@@ -368,7 +354,7 @@ private fun StreamPresetSelectorCard(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "Capture Resolution & Format",
+                    text = "Hardware MJPEG Resolution",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -376,7 +362,7 @@ private fun StreamPresetSelectorCard(
 
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "MJPEG compresses over USB 2.0 to unlock 60 FPS (YUV uncompressed is hardware-capped at ~6 FPS).",
+                text = "YUV uncompressed mode is completely disabled. Only hardware MJPEG is used for 60 FPS.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -384,39 +370,41 @@ private fun StreamPresetSelectorCard(
             Spacer(modifier = Modifier.height(12.dp))
 
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                presets.chunked(2).forEach { rowPresets ->
-                    Row(
+                presets.forEach { preset ->
+                    val isSelected = preset.id == selectedPreset.id
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onSelectPreset(preset) },
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        rowPresets.forEach { preset ->
-                            val isSelected = preset.id == selectedPreset.id
-                            FilterChip(
-                                selected = isSelected,
-                                onClick = { onSelectPreset(preset) },
-                                modifier = Modifier.weight(1f),
-                                label = {
-                                    Text(
-                                        text = preset.label,
-                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                        fontSize = 12.sp
-                                    )
-                                },
-                                leadingIcon = {
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = Icons.Default.CheckCircle,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                    }
-                                }
-                            )
+                        label = {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = preset.label,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "${preset.width}x${preset.height}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        },
+                        leadingIcon = {
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
                         }
-                        if (rowPresets.size == 1) {
-                            Spacer(modifier = Modifier.weight(1f))
-                        }
-                    }
+                    )
                 }
             }
 
@@ -424,7 +412,7 @@ private fun StreamPresetSelectorCard(
             Text(
                 text = selectedPreset.description,
                 style = MaterialTheme.typography.labelSmall,
-                color = if (selectedPreset.isMjpeg) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                color = MaterialTheme.colorScheme.primary,
                 fontWeight = FontWeight.Medium
             )
         }
@@ -489,7 +477,7 @@ private fun UsbVideoPreviewCard(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "USB FEED ACTIVE",
+                                text = "MJPEG FEED ACTIVE",
                                 color = Color(0xFF10B981),
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.Bold
