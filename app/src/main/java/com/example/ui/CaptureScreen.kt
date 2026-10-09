@@ -383,34 +383,40 @@ private fun StreamPresetSelectorCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                presets.forEach { preset ->
-                    val isSelected = preset.id == selectedPreset.id
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { onSelectPreset(preset) },
-                        label = {
-                            Text(
-                                text = preset.label,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                presets.chunked(2).forEach { rowPresets ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        rowPresets.forEach { preset ->
+                            val isSelected = preset.id == selectedPreset.id
+                            FilterChip(
+                                selected = isSelected,
+                                onClick = { onSelectPreset(preset) },
+                                modifier = Modifier.weight(1f),
+                                label = {
+                                    Text(
+                                        text = preset.label,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        fontSize = 12.sp
+                                    )
+                                },
+                                leadingIcon = {
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
                             )
-                        },
-                        leadingIcon = {
-                            if (isSelected) {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = if (preset.isMjpeg) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
-                        )
-                    )
+                        }
+                        if (rowPresets.size == 1) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
                 }
             }
 

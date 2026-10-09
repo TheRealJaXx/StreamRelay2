@@ -28,10 +28,14 @@ class UvcCaptureEngine(
     private val _isDeviceConnected = MutableStateFlow(false)
     val isDeviceConnected: StateFlow<Boolean> = _isDeviceConnected.asStateFlow()
 
-    // Default to 720p MJPEG for high framerate (60fps) and lowest latency
-    private var targetWidth = 1280
-    private var targetHeight = 720
-    private var targetIsMjpeg = true
+    private var selectedPreset: StreamPreset = StreamPreset(
+        id = "mjpeg_720p",
+        label = "720p MJPEG (60 FPS)",
+        width = 1280,
+        height = 720,
+        isMjpeg = true,
+        description = "Recommended for PS3 · 60fps · Low Latency"
+    )
 
     private var currentSurface: Any? = null
     private var activeDevice: UsbDevice? = null
@@ -48,20 +52,49 @@ class UvcCaptureEngine(
     }
 
     fun setStreamPreset(preset: StreamPreset) {
-        val changed = targetWidth != preset.width || targetHeight != preset.height || targetIsMjpeg != preset.isMjpeg
-        targetWidth = preset.width
-        targetHeight = preset.height
-        targetIsMjpeg = preset.isMjpeg
+        selectedPreset = preset
+        val isMjpeg = preset.isMjpeg
+        val formatName = if (isMjpeg) "MJPEG" else "YUV"
 
-        val fmtName = if (preset.isMjpeg) "MJPEG (High FPS)" else "YUV (Uncompressed)"
-        onLog("UVC", "Selected stream preset: ${preset.width}x${preset.height} $fmtName", false)
+        onLog("UVC", "Selecting preset: ${preset.width}x${preset.height} $formatName...", false)
 
-        if (changed && cameraHelper.isCameraOpened) {
-            onLog("UVC", "Re-opening camera with new stream settings...", false)
-            stopCapture()
-            activeDevice?.let { dev ->
-                startCapture(dev)
+        if (cameraHelper.isCameraOpened) {
+            applySizeToCamera(preset)
+        }
+    }
+
+    private fun applySizeToCamera(preset: StreamPreset) {
+        val supported = cameraHelper.supportedSizeList ?: emptyList()
+        val targetType = if (preset.isMjpeg) UVCCamera.FRAME_FORMAT_MJPEG else UVCCamera.FRAME_FORMAT_YUYV
+        val formatLabel = if (preset.isMjpeg) "MJPEG" else "YUV"
+
+        val matched: Size? = supported.firstOrNull {
+            it.type == targetType && it.width == preset.width && it.height == preset.height
+        } ?: supported.firstOrNull {
+            it.type == targetType && it.width == preset.width
+        } ?: supported.firstOrNull {
+            it.type == targetType
+        } ?: supported.firstOrNull()
+
+        if (matched != null) {
+            val actualFmt = if (matched.type == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUV"
+            onLog("UVC", "Switching resolution to: ${matched.width}x${matched.height} $actualFmt (${matched.fps}fps)...", false)
+            try {
+                cameraHelper.setPreviewSize(matched)
+                val curSize = cameraHelper.previewSize ?: matched
+                val curFmt = if (curSize.type == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUV"
+
+                _telemetry.value = _telemetry.value.copy(
+                    resolutionWidth = curSize.width,
+                    resolutionHeight = curSize.height,
+                    bufferFormat = curFmt
+                )
+                onLog("UVC", "Resolution successfully applied: ${curSize.width}x${curSize.height} $curFmt", false)
+            } catch (e: Exception) {
+                onLog("UVC", "Failed to switch resolution: ${e.message}", true)
             }
+        } else {
+            onLog("UVC", "No matching hardware size found for ${preset.width}x${preset.height} $formatLabel", true)
         }
     }
 
@@ -73,58 +106,39 @@ class UvcCaptureEngine(
             }
 
             override fun onDeviceOpen(device: UsbDevice, isUsingCache: Boolean) {
-                onLog("UVC", "USB connection established. Configuring capture mode...", false)
+                onLog("UVC", "USB device connected. Opening hardware camera...", false)
                 activeDevice = device
 
-                val targetType = if (targetIsMjpeg) UVCCamera.FRAME_FORMAT_MJPEG else UVCCamera.FRAME_FORMAT_YUYV
-                val formatLabel = if (targetIsMjpeg) "MJPEG" else "YUV"
-
-                val supportedSizes = cameraHelper.supportedSizeList ?: emptyList()
-                if (supportedSizes.isNotEmpty()) {
-                    val mjpegCount = supportedSizes.count { it.type == UVCCamera.FRAME_FORMAT_MJPEG }
-                    val yuvCount = supportedSizes.count { it.type == UVCCamera.FRAME_FORMAT_YUYV }
-                    onLog("UVC", "Card capabilities: $mjpegCount MJPEG mode(s), $yuvCount YUV mode(s)", false)
-                }
-
-                // Find matching format and resolution
-                val chosenSize: Size = supportedSizes.firstOrNull {
-                    it.type == targetType && it.width == targetWidth && it.height == targetHeight
-                } ?: supportedSizes.firstOrNull {
-                    it.type == targetType && it.width == targetWidth
-                } ?: supportedSizes.firstOrNull {
-                    it.type == targetType
-                } ?: supportedSizes.firstOrNull()
-                ?: Size(targetType, targetWidth, targetHeight, 30, null)
-
-                val chosenFormatLabel = if (chosenSize.type == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUV"
-                onLog("UVC", "Opening UVC camera at ${chosenSize.width}x${chosenSize.height} ($chosenFormatLabel)...", false)
-
                 try {
-                    cameraHelper.openCamera(chosenSize)
+                    cameraHelper.openCamera()
                 } catch (e: Exception) {
-                    onLog("UVC", "Failed to open UVC camera with preset, falling back: ${e.message}", true)
-                    try {
-                        cameraHelper.openCamera()
-                    } catch (fallbackEx: Exception) {
-                        onLog("UVC", "Fatal open error: ${fallbackEx.message}", true)
-                    }
+                    onLog("UVC", "Error opening UVC camera: ${e.message}", true)
                 }
             }
 
             override fun onCameraOpen(device: UsbDevice) {
                 activeDevice = device
+                onLog("UVC", "Camera opened. Reading hardware capabilities...", false)
+
+                // Log all capabilities supported by this capture card
+                val supported = cameraHelper.supportedSizeList ?: emptyList()
+                onLog("UVC", "Capture card supports ${supported.size} video modes:", false)
+                for (s in supported) {
+                    val f = if (s.type == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUV"
+                    onLog("UVC", " • ${s.width}x${s.height} $f (${s.fps}fps)", false)
+                }
+
+                // Immediately apply user-selected preset (e.g. 720p or 480p MJPEG)
+                applySizeToCamera(selectedPreset)
 
                 currentSurface?.let {
                     cameraHelper.addSurface(it, false)
                 }
 
-                val previewSize = cameraHelper.previewSize
-                val width = previewSize?.width ?: targetWidth
-                val height = previewSize?.height ?: targetHeight
-                val isActuallyMjpeg = previewSize?.type == UVCCamera.FRAME_FORMAT_MJPEG || (previewSize == null && targetIsMjpeg)
-                val formatString = if (isActuallyMjpeg) "MJPEG" else "YUV"
-
-                onLog("UVC", "UVC Camera opened! Active format: ${width}x${height} $formatString", false)
+                val activeSize = cameraHelper.previewSize
+                val width = activeSize?.width ?: selectedPreset.width
+                val height = activeSize?.height ?: selectedPreset.height
+                val formatString = if (activeSize?.type == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUV"
 
                 _telemetry.value = _telemetry.value.copy(
                     isStreaming = true,
@@ -154,18 +168,23 @@ class UvcCaptureEngine(
                             frameCountSinceLastMeasure = 0
 
                             val durationSec = (now - sessionStartTime) / 1000L
+                            val currentSize = cameraHelper.previewSize
+                            val currentFmt = if (currentSize?.type == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUV"
 
                             _telemetry.value = _telemetry.value.copy(
                                 isStreaming = true,
                                 fps = (currentFps * 10).roundToInt() / 10f,
                                 totalFrames = totalFramesCounter,
+                                resolutionWidth = currentSize?.width ?: width,
+                                resolutionHeight = currentSize?.height ?: height,
+                                bufferFormat = currentFmt,
                                 lastFrameTimeMs = now,
                                 lastFrameSizeBytes = sizeBytes,
                                 streamDurationSeconds = durationSec
                             )
 
                             if (totalFramesCounter % 120L == 0L) {
-                                onLog("UVC", "Frames: $totalFramesCounter | FPS: ${"%.1f".format(currentFps)} | Format: $formatString", false)
+                                onLog("UVC", "Frames: $totalFramesCounter | FPS: ${"%.1f".format(currentFps)} | Mode: ${currentSize?.width}x${currentSize?.height} $currentFmt", false)
                             }
                         } else {
                             _telemetry.value = _telemetry.value.copy(
@@ -177,7 +196,9 @@ class UvcCaptureEngine(
                         }
 
                         if (totalFramesCounter == 1L) {
-                            onLog("UVC", "SUCCESS: Receiving frames in $formatString mode at ${width}x${height}!", false)
+                            val currentSize = cameraHelper.previewSize
+                            val currentFmt = if (currentSize?.type == UVCCamera.FRAME_FORMAT_MJPEG) "MJPEG" else "YUV"
+                            onLog("UVC", "SUCCESS: Ingesting frames at ${currentSize?.width}x${currentSize?.height} $currentFmt!", false)
                         }
                     }, UVCCamera.PIXEL_FORMAT_YUV)
                 } catch (e: Exception) {
@@ -245,8 +266,8 @@ class UvcCaptureEngine(
         }
 
         activeDevice = target
-        val formatLabel = if (targetIsMjpeg) "MJPEG" else "YUV"
-        onLog("UVC", "Connecting to ${target.productName ?: target.deviceName} (Target: ${targetWidth}x${targetHeight} $formatLabel)...", false)
+        val formatLabel = if (selectedPreset.isMjpeg) "MJPEG" else "YUV"
+        onLog("UVC", "Opening ${target.productName ?: target.deviceName} for ${selectedPreset.width}x${selectedPreset.height} $formatLabel...", false)
 
         try {
             cameraHelper.selectDevice(target)
