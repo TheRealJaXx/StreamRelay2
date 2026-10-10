@@ -2,6 +2,8 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
+import android.graphics.SurfaceTexture
+import android.view.Surface
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.model.CaptureTelemetry
@@ -114,44 +116,65 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             }
         }
 
-        // Restore remembered mode
-        val savedModeStr = prefs.getString("pref_last_mode", AppMode.UNSELECTED.name)
-        val savedMode = try {
-            AppMode.valueOf(savedModeStr ?: AppMode.UNSELECTED.name)
-        } catch (_: Exception) {
-            AppMode.UNSELECTED
-        }
-
-        if (savedMode != AppMode.UNSELECTED) {
-            selectMode(savedMode, persist = false)
-        }
+        // Selection is requested fresh every launch (remember mode disabled)
     }
 
-    fun selectMode(mode: AppMode, persist: Boolean = true) {
-        _currentMode.value = mode
-        if (persist) {
-            prefs.edit().putString("pref_last_mode", mode.name).apply()
+    private var offscreenTexture: SurfaceTexture? = null
+    private var offscreenSurface: Surface? = null
+
+    private fun ensureOffscreenSurface(): Surface {
+        val existing = offscreenSurface
+        if (existing != null && existing.isValid) {
+            return existing
         }
+        releaseOffscreenSurface()
+        val texture = SurfaceTexture(10).apply {
+            setDefaultBufferSize(1280, 720)
+        }
+        offscreenTexture = texture
+        val surface = Surface(texture)
+        offscreenSurface = surface
+        return surface
+    }
+
+    private fun releaseOffscreenSurface() {
+        try {
+            offscreenSurface?.release()
+        } catch (_: Exception) {}
+        offscreenSurface = null
+        try {
+            offscreenTexture?.release()
+        } catch (_: Exception) {}
+        offscreenTexture = null
+    }
+
+    fun selectMode(mode: AppMode) {
+        _currentMode.value = mode
 
         when (mode) {
             AppMode.TX -> {
                 relayClient.disconnect()
                 refreshLocalIp()
                 usbMonitor.start()
+                val surface = ensureOffscreenSurface()
+                uvcCaptureEngine.setPreviewSurface(surface)
                 uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
                 startTxRelayServer(_txPort.value)
-                // Start capturing if device already attached
                 startCapture()
             }
             AppMode.RX -> {
                 stopTxRelayServer()
                 uvcCaptureEngine.stopCapture()
+                uvcCaptureEngine.setPreviewSurface(null)
+                releaseOffscreenSurface()
                 usbMonitor.stop()
             }
             AppMode.UNSELECTED -> {
                 stopTxRelayServer()
                 relayClient.disconnect()
                 uvcCaptureEngine.stopCapture()
+                uvcCaptureEngine.setPreviewSurface(null)
+                releaseOffscreenSurface()
                 usbMonitor.stop()
             }
         }
@@ -203,9 +226,15 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun startCapture() {
+        val uvcInfo = connectedUsbDevices.value.firstOrNull { it.isUvcVideo } ?: connectedUsbDevices.value.firstOrNull()
         val uvcDevice = usbMonitor.getFirstUvcDevice()
         if (uvcDevice != null) {
-            uvcCaptureEngine.startCapture(uvcDevice)
+            if (uvcInfo?.hasPermission == true) {
+                uvcCaptureEngine.startCapture(uvcDevice)
+            } else {
+                val name = uvcInfo?.displayName ?: uvcDevice.productName ?: "USB Video"
+                addLog("TX", "Capture card detected ($name). Waiting for USB permission...", false)
+            }
         } else {
             addLog("TX", "No USB capture card found. Waiting for UVC device connection...", false)
         }
@@ -252,6 +281,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         stopTxRelayServer()
         relayClient.disconnect()
         usbMonitor.stop()
+        uvcCaptureEngine.setPreviewSurface(null)
+        releaseOffscreenSurface()
         uvcCaptureEngine.release()
     }
 }

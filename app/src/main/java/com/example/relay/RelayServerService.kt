@@ -10,8 +10,10 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
+import com.example.R
 
 class RelayServerService : Service {
 
@@ -20,39 +22,56 @@ class RelayServerService : Service {
     companion object {
         const val CHANNEL_ID = "stream_relay_tx_channel"
         const val NOTIFICATION_ID = 4120
+        private const val TAG = "RelayServerService"
 
         fun start(context: Context) {
-            val intent = Intent(context, RelayServerService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                val intent = Intent(context, RelayServerService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not start foreground service: ${e.message}", e)
             }
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, RelayServerService::class.java)
-            context.stopService(intent)
+            try {
+                val intent = Intent(context, RelayServerService::class.java)
+                context.stopService(intent)
+            } catch (e: Exception) {
+                Log.e(TAG, "Could not stop service: ${e.message}", e)
+            }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
+        try {
+            createNotificationChannel()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed creating notification channel: ${e.message}", e)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = buildNotification()
+        try {
+            val notification = buildNotification()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                } catch (e: Exception) {
+                    Log.w(TAG, "startForeground with connectedDevice failed, falling back: ${e.message}")
+                    startForeground(NOTIFICATION_ID, notification)
+                }
             } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                startForeground(NOTIFICATION_ID, notification)
             }
-            startForeground(NOTIFICATION_ID, notification, serviceType)
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Log.e(TAG, "Fatal startForeground exception caught: ${e.message}", e)
         }
 
         return START_STICKY
@@ -86,7 +105,7 @@ class RelayServerService : Service {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Stream Relay TX Active")
             .setContentText("Relaying HDMI capture card video over local network")
-            .setSmallIcon(android.R.drawable.ic_menu_upload)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()

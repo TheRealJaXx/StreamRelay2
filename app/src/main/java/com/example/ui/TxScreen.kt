@@ -2,6 +2,8 @@ package com.example.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -534,13 +536,14 @@ private fun DiagnosticLogsSection(
                         )
                     }
                 } else {
-                    LazyColumn(
+                    Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(8.dp),
+                            .padding(8.dp)
+                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        items(logs, key = { it.id }) { log ->
+                        logs.take(50).forEach { log ->
                             Row(modifier = Modifier.fillMaxWidth()) {
                                 Text(
                                     text = log.timestamp,
