@@ -19,7 +19,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.roundToInt
 
 class AudioCaptureEngine(
     private val context: Context,
@@ -35,20 +38,24 @@ class AudioCaptureEngine(
     private val audioScope = CoroutineScope(Dispatchers.IO)
     private val isRunning = AtomicBoolean(false)
     private var captureJob: Job? = null
-
     private var audioRecord: AudioRecord? = null
     private var localAudioTrack: AudioTrack? = null
 
     private val _isCapturing = MutableStateFlow(false)
     val isCapturing: StateFlow<Boolean> = _isCapturing.asStateFlow()
 
-    private val _isLocalPlaybackEnabled = MutableStateFlow(true)
-    val isLocalPlaybackEnabled: StateFlow<Boolean> = _isLocalPlaybackEnabled.asStateFlow()
+    private val _isMuted = MutableStateFlow(false)
+    val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
 
-    private val _activeDeviceName = MutableStateFlow("Detecting USB Audio...")
-    val activeDeviceName: StateFlow<String> = _activeDeviceName.asStateFlow()
+    private val _volume = MutableStateFlow(1f)
+    val volume: StateFlow<Float> = _volume.asStateFlow()
 
-    var onAudioChunkCaptured: ((ByteArray) -> Unit)? = null
+    private val _outputDeviceType = MutableStateFlow("speaker")
+    val outputDeviceType: StateFlow<String> = _outputDeviceType.asStateFlow()
+
+    private val audioQueue = ArrayDeque<ByteArray>()
+    private val queuedBytes = AtomicInteger(0)
+    private val maxQueuedBytes = (SAMPLE_RATE * 2 * 2 * 0.04f).roundToInt()
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private var deviceCallback: AudioDeviceCallback? = null
@@ -61,21 +68,12 @@ class AudioCaptureEngine(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && audioManager != null) {
             val callback = object : AudioDeviceCallback() {
                 override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
-                    val usb = addedDevices?.firstOrNull { isUsbAudioDevice(it) }
-                    if (usb != null) {
-                        onLog("TX-Audio", "USB Audio connected: ${usb.productName}", false)
-                        _activeDeviceName.value = usb.productName?.toString() ?: "USB Capture Audio"
-                        if (isRunning.get() && audioRecord == null) {
-                            startCaptureLoop()
-                        }
-                    }
+                    val outputType = detectOutputDeviceType()
+                    _outputDeviceType.value = outputType
                 }
 
                 override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
-                    val usb = removedDevices?.firstOrNull { isUsbAudioDevice(it) }
-                    if (usb != null) {
-                        onLog("TX-Audio", "USB Audio disconnected: ${usb.productName}", false)
-                    }
+                    _outputDeviceType.value = detectOutputDeviceType()
                 }
             }
             audioManager.registerAudioDeviceCallback(callback, null)
@@ -83,49 +81,80 @@ class AudioCaptureEngine(
         }
     }
 
+    private fun detectOutputDeviceType(): String {
+        if (audioManager == null) return "speaker"
+        return try {
+            val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            if (outputs.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }) {
+                "bluetooth"
+            } else if (outputs.any { it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET || it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES || it.type == AudioDeviceInfo.TYPE_USB_DEVICE }) {
+                "wired"
+            } else {
+                "speaker"
+            }
+        } catch (_: SecurityException) {
+            "speaker"
+        }
+    }
+
     private fun isUsbAudioDevice(device: AudioDeviceInfo): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             device.isSource && (
                 device.type == AudioDeviceInfo.TYPE_USB_DEVICE ||
-                device.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
-                device.type == AudioDeviceInfo.TYPE_USB_ACCESSORY
-            )
-        } else false
+                    device.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
+                    device.type == AudioDeviceInfo.TYPE_USB_ACCESSORY
+                )
+        } else {
+            false
+        }
     }
 
     private fun findUsbAudioDevice(): AudioDeviceInfo? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && audioManager != null) {
-            val devices = audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
-            return devices.firstOrNull { isUsbAudioDevice(it) }
+            return try {
+                audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+                    .firstOrNull { isUsbAudioDevice(it) }
+            } catch (_: SecurityException) {
+                null
+            }
         }
         return null
     }
 
     fun setLocalPlaybackEnabled(enabled: Boolean) {
-        _isLocalPlaybackEnabled.value = enabled
-        if (!enabled) {
+        setMuted(!enabled)
+    }
+
+    fun setMuted(muted: Boolean) {
+        _isMuted.value = muted
+        updateTrackVolume()
+    }
+
+    fun setVolume(value: Float) {
+        _volume.value = value.coerceIn(0f, 1f)
+        updateTrackVolume()
+    }
+
+    private fun updateTrackVolume() {
+        val target = if (_isMuted.value) 0f else _volume.value.coerceIn(0f, 1f)
+        val track = localAudioTrack
+        if (track != null) {
             try {
-                localAudioTrack?.pause()
-                localAudioTrack?.flush()
-            } catch (_: Exception) {}
-        } else {
-            try {
-                localAudioTrack?.play()
-            } catch (_: Exception) {}
+                track.setStereoVolume(target, target)
+            } catch (_: Exception) {
+            }
         }
-        onLog("TX-Audio", if (enabled) "Phone speaker audio enabled" else "Phone speaker audio muted", false)
     }
 
     fun start() {
         if (isRunning.get()) return
-
         val hasPermission = ContextCompat.checkSelfPermission(
             context,
             android.Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
 
         if (!hasPermission) {
-            onLog("TX-Audio", "Microphone/Audio permission required for HDMI audio capture.", false)
+            onLog("USB-Audio", "Audio permission required for USB audio capture.", false)
             return
         }
 
@@ -137,66 +166,103 @@ class AudioCaptureEngine(
         captureJob?.cancel()
         captureJob = audioScope.launch {
             val usbDevice = findUsbAudioDevice()
-            val deviceName = usbDevice?.productName?.toString() ?: "USB Capture Audio"
-            _activeDeviceName.value = deviceName
+            val deviceName = usbDevice?.productName?.toString() ?: "USB capture audio"
+            _outputDeviceType.value = detectOutputDeviceType()
 
-            val minBufSize = maxOf(
-                AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_IN, AUDIO_FORMAT),
-                SAMPLE_RATE * 4 / 20 // 50ms buffer
-            )
+            val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_IN, AUDIO_FORMAT)
+            val chunkBytes = (SAMPLE_RATE * 0.01f * 4f).roundToInt()
+            val bufferSize = maxOf(minBufferSize, chunkBytes * 2)
+            val record = initAudioRecord(SAMPLE_RATE, bufferSize, usbDevice)
 
-            val record = initAudioRecord(SAMPLE_RATE, minBufSize, usbDevice)
             if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
-                onLog("TX-Audio", "Failed to initialize AudioRecord. Retrying...", true)
+                onLog("USB-Audio", "Failed to initialize AudioRecord. Retrying...", true)
                 _isCapturing.value = false
+                isRunning.set(false)
                 return@launch
             }
 
             audioRecord = record
-
             val track = initLocalAudioTrack(SAMPLE_RATE)
             localAudioTrack = track
-            if (_isLocalPlaybackEnabled.value) {
-                try { track?.play() } catch (_: Exception) {}
+            updateTrackVolume()
+            if (track != null) {
+                try {
+                    track.play()
+                } catch (_: Exception) {
+                }
             }
 
             try {
                 record.startRecording()
                 _isCapturing.value = true
-                onLog("TX-Audio", "Audio live from $deviceName (48kHz Stereo)", false)
+                onLog("USB-Audio", "Audio live from $deviceName (48kHz stereo)", false)
 
-                // 20ms chunks (48000 samples/sec * 4 bytes/sample / 50 = 3840 bytes)
-                val chunkSize = (SAMPLE_RATE * 4) / 50
-                val pcmBuffer = ByteArray(chunkSize)
-
+                val pcmBuffer = ByteArray(chunkBytes)
                 while (isRunning.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     val readBytes = record.read(pcmBuffer, 0, pcmBuffer.size)
                     if (readBytes > 0) {
-                        // 1. Play on phone speakers/earpiece if enabled
-                        if (_isLocalPlaybackEnabled.value) {
-                            localAudioTrack?.write(pcmBuffer, 0, readBytes)
-                        }
-
-                        // 2. Transmit to network receiver
-                        val copy = pcmBuffer.copyOf(readBytes)
-                        onAudioChunkCaptured?.invoke(copy)
+                        enqueueAudio(pcmBuffer.copyOf(readBytes))
+                        drainAudioQueue()
                     }
                 }
             } catch (e: Exception) {
-                onLog("TX-Audio", "Audio capture loop ended: ${e.message}", false)
+                onLog("USB-Audio", "Audio capture loop ended: ${e.message}", false)
             } finally {
                 _isCapturing.value = false
                 try {
                     record.stop()
                     record.release()
-                } catch (_: Exception) {}
+                } catch (_: Exception) {
+                }
                 audioRecord = null
-
                 try {
                     track?.stop()
                     track?.release()
-                } catch (_: Exception) {}
+                } catch (_: Exception) {
+                }
                 localAudioTrack = null
+                queuedBytes.set(0)
+                audioQueue.clear()
+                isRunning.set(false)
+            }
+        }
+    }
+
+    private fun enqueueAudio(chunk: ByteArray) {
+        synchronized(audioQueue) {
+            while (queuedBytes.get() + chunk.size > maxQueuedBytes && audioQueue.isNotEmpty()) {
+                val oldest = audioQueue.removeFirst()
+                queuedBytes.addAndGet(-oldest.size)
+            }
+            audioQueue.addLast(chunk)
+            queuedBytes.addAndGet(chunk.size)
+        }
+    }
+
+    private fun drainAudioQueue() {
+        while (true) {
+            val next = synchronized(audioQueue) {
+                if (audioQueue.isEmpty()) {
+                    null
+                } else {
+                    val chunk = audioQueue.removeFirst()
+                    queuedBytes.addAndGet(-chunk.size)
+                    chunk
+                }
+            } ?: return
+
+            val track = localAudioTrack ?: return
+            val written = track.write(next, 0, next.size)
+            if (written < 0) {
+                return
+            }
+            if (written < next.size) {
+                val remainder = next.copyOfRange(written, next.size)
+                synchronized(audioQueue) {
+                    audioQueue.addFirst(remainder)
+                    queuedBytes.addAndGet(remainder.size)
+                }
+                return
             }
         }
     }
@@ -212,7 +278,7 @@ class AudioCaptureEngine(
         for (source in audioSources) {
             try {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    val builder = AudioRecord.Builder()
+                    val record = AudioRecord.Builder()
                         .setAudioSource(source)
                         .setAudioFormat(
                             AudioFormat.Builder()
@@ -222,38 +288,36 @@ class AudioCaptureEngine(
                                 .build()
                         )
                         .setBufferSizeInBytes(bufferSize)
-
-                    val record = builder.build()
+                        .build()
                     if (record.state == AudioRecord.STATE_INITIALIZED) {
                         if (usbDevice != null) {
                             record.setPreferredDevice(usbDevice)
                         }
                         return record
-                    } else {
-                        record.release()
                     }
+                    record.release()
                 } else {
                     @Suppress("DEPRECATION")
                     val record = AudioRecord(source, sampleRate, CHANNEL_CONFIG_IN, AUDIO_FORMAT, bufferSize)
                     if (record.state == AudioRecord.STATE_INITIALIZED) {
                         return record
-                    } else {
-                        record.release()
                     }
+                    record.release()
                 }
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+            }
         }
         return null
     }
 
     private fun initLocalAudioTrack(sampleRate: Int): AudioTrack? {
         return try {
-            val minBufSize = AudioTrack.getMinBufferSize(sampleRate, CHANNEL_CONFIG_OUT, AUDIO_FORMAT) * 2
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val minBufferSize = AudioTrack.getMinBufferSize(sampleRate, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
+            val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 AudioTrack.Builder()
                     .setAudioAttributes(
                         AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setUsage(AudioAttributes.USAGE_GAME)
                             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                             .build()
                     )
@@ -264,9 +328,17 @@ class AudioCaptureEngine(
                             .setChannelMask(CHANNEL_CONFIG_OUT)
                             .build()
                     )
-                    .setBufferSizeInBytes(minBufSize)
+                    .setBufferSizeInBytes(minBufferSize)
                     .setTransferMode(AudioTrack.MODE_STREAM)
-                    .build()
+            } else {
+                null
+            }
+
+            if (builder != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                }
+                builder.build()
             } else {
                 @Suppress("DEPRECATION")
                 AudioTrack(
@@ -274,7 +346,7 @@ class AudioCaptureEngine(
                     sampleRate,
                     CHANNEL_CONFIG_OUT,
                     AUDIO_FORMAT,
-                    minBufSize,
+                    minBufferSize,
                     AudioTrack.MODE_STREAM
                 )
             }
@@ -286,21 +358,24 @@ class AudioCaptureEngine(
     fun stop() {
         isRunning.set(false)
         _isCapturing.value = false
-
         captureJob?.cancel()
         captureJob = null
 
         try {
             audioRecord?.stop()
             audioRecord?.release()
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
         audioRecord = null
 
         try {
             localAudioTrack?.stop()
             localAudioTrack?.release()
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+        }
         localAudioTrack = null
+        audioQueue.clear()
+        queuedBytes.set(0)
     }
 
     fun release() {
@@ -311,3 +386,4 @@ class AudioCaptureEngine(
         }
     }
 }
+
