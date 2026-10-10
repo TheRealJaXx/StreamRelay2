@@ -41,8 +41,10 @@ class UvcCaptureEngine(
 
     private var frameCountSinceLastMeasure = 0
     private var lastFpsMeasureTime = 0L
-    private var totalFramesCounter = 0L
     private var sessionStartTime = 0L
+    private var totalFramesCounter = 0L
+
+    var onRawFrameCaptured: ((ByteArray) -> Unit)? = null
 
     init {
         UVCUtils.init(context)
@@ -208,7 +210,15 @@ class UvcCaptureEngine(
                         if (totalFramesCounter == 1L) {
                             onLog("UVC", "SUCCESS: Receiving MJPEG frames at ${width}x${height}!", false)
                         }
-                    }, UVCCamera.PIXEL_FORMAT_YUV)
+
+                        if (sizeBytes > 0 && onRawFrameCaptured != null) {
+                            val rawBytes = ByteArray(sizeBytes)
+                            val pos = byteBuffer.position()
+                            byteBuffer.get(rawBytes)
+                            byteBuffer.position(pos)
+                            onRawFrameCaptured?.invoke(rawBytes)
+                        }
+                    }, UVCCamera.PIXEL_FORMAT_RAW)
                 } catch (e: Exception) {
                     onLog("UVC", "Frame callback note: ${e.message}", false)
                 }
