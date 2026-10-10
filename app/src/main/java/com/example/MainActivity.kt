@@ -36,19 +36,32 @@ class MainActivity : ComponentActivity() {
       MyApplicationTheme {
         val currentMode by viewModel.currentMode.collectAsStateWithLifecycle()
 
-        val permissionLauncher = rememberLauncherForActivityResult(
-          contract = ActivityResultContracts.RequestPermission()
-        ) { _ -> }
+        val multiplePermissionLauncher = rememberLauncherForActivityResult(
+          contract = ActivityResultContracts.RequestMultiplePermissions()
+        ) { result ->
+          if (result[Manifest.permission.RECORD_AUDIO] == true) {
+            viewModel.onAudioPermissionGranted()
+          }
+        }
 
         LaunchedEffect(currentMode) {
           if (currentMode == AppMode.TX) {
-            val hasPermission = ContextCompat.checkSelfPermission(
+            val cameraGranted = ContextCompat.checkSelfPermission(
               this@MainActivity,
               Manifest.permission.CAMERA
             ) == PackageManager.PERMISSION_GRANTED
 
-            if (!hasPermission) {
-              permissionLauncher.launch(Manifest.permission.CAMERA)
+            val audioGranted = ContextCompat.checkSelfPermission(
+              this@MainActivity,
+              Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+
+            val needPermissions = mutableListOf<String>()
+            if (!cameraGranted) needPermissions.add(Manifest.permission.CAMERA)
+            if (!audioGranted) needPermissions.add(Manifest.permission.RECORD_AUDIO)
+
+            if (needPermissions.isNotEmpty()) {
+              multiplePermissionLauncher.launch(needPermissions.toTypedArray())
             }
           }
         }

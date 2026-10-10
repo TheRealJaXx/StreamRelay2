@@ -1,12 +1,14 @@
 package com.example.relay
 
-import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
@@ -15,11 +17,15 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 class RelayServer(
     private val onLog: (tag: String, message: String, isError: Boolean) -> Unit
 ) {
+    companion object {
+        const val PKT_TYPE_VIDEO: Byte = 0x01
+        const val PKT_TYPE_AUDIO: Byte = 0x02
+    }
+
     private var serverSocket: ServerSocket? = null
     private val isRunning = AtomicBoolean(false)
     private var serverJob: Job? = null
@@ -37,9 +43,11 @@ class RelayServer(
     private val _framesSent = MutableStateFlow(0L)
     val framesSent: StateFlow<Long> = _framesSent.asStateFlow()
 
-    // Holds only the latest un-transmitted frame; older frames are immediately dropped
-    private val latestFrame = AtomicReference<ByteArray?>(null)
-    private val frameSignal = Object()
+    // Conflated channel holds only the newest video frame (drops older frames if client lags)
+    private var videoChannel = Channel<ByteArray>(Channel.CONFLATED)
+
+    // Buffered channel preserves smooth real-time audio chunks (20ms chunks)
+    private var audioChannel = Channel<ByteArray>(Channel.BUFFERED)
 
     @Volatile
     private var activeClientSocket: Socket? = null
@@ -53,6 +61,8 @@ class RelayServer(
         _serverPort.value = port
         isRunning.set(true)
         _isServerActive.value = true
+        videoChannel = Channel(Channel.CONFLATED)
+        audioChannel = Channel(Channel.BUFFERED)
 
         serverJob = serverScope.launch {
             try {
@@ -60,7 +70,7 @@ class RelayServer(
                 ss.reuseAddress = true
                 ss.bind(InetSocketAddress("0.0.0.0", port))
                 serverSocket = ss
-                onLog("TX-Relay", "TCP Server listening on port $port (TCP_NODELAY enabled)", false)
+                onLog("TX-Relay", "TCP Unified Server (Video + Audio) listening on port $port", false)
 
                 while (isRunning.get()) {
                     try {
@@ -91,7 +101,7 @@ class RelayServer(
 
         activeClientSocket = newSocket
         val clientAddress = newSocket.inetAddress.hostAddress ?: "Unknown"
-        onLog("TX-Relay", "Client connected from $clientAddress", false)
+        onLog("TX-Relay", "Client connected from $clientAddress (Streaming Video + Audio)", false)
         _connectedClients.value = 1
 
         serverScope.launch {
@@ -99,33 +109,43 @@ class RelayServer(
         }
     }
 
-    private fun serveClient(socket: Socket) {
+    private suspend fun serveClient(socket: Socket) {
         try {
             socket.tcpNoDelay = true
             socket.sendBufferSize = 256 * 1024
             val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
+            val writeLock = Any()
 
-            while (isRunning.get() && !socket.isClosed && socket.isConnected) {
-                var frame: ByteArray? = latestFrame.getAndSet(null)
+            val videoSenderJob = serverScope.launch {
+                while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
+                    val frame = videoChannel.receive()
+                    if (frame.isNotEmpty()) {
+                        synchronized(writeLock) {
+                            outputStream.writeByte(PKT_TYPE_VIDEO.toInt())
+                            outputStream.writeInt(frame.size)
+                            outputStream.write(frame)
+                            outputStream.flush()
+                        }
+                        _framesSent.value++
+                    }
+                }
+            }
 
-                if (frame == null) {
-                    synchronized(frameSignal) {
-                        frame = latestFrame.getAndSet(null)
-                        if (frame == null) {
-                            frameSignal.wait(50) // Wait up to 50ms for the next frame
-                            frame = latestFrame.getAndSet(null)
+            val audioSenderJob = serverScope.launch {
+                while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
+                    val audioChunk = audioChannel.receive()
+                    if (audioChunk.isNotEmpty()) {
+                        synchronized(writeLock) {
+                            outputStream.writeByte(PKT_TYPE_AUDIO.toInt())
+                            outputStream.writeInt(audioChunk.size)
+                            outputStream.write(audioChunk)
+                            outputStream.flush()
                         }
                     }
                 }
-
-                if (frame != null && frame.isNotEmpty()) {
-                    // Send 4-byte big-endian length followed by raw JPEG bytes
-                    outputStream.writeInt(frame.size)
-                    outputStream.write(frame)
-                    outputStream.flush()
-                    _framesSent.value++
-                }
             }
+
+            joinAll(videoSenderJob, audioSenderJob)
         } catch (e: Exception) {
             onLog("TX-Relay", "Client disconnected: ${e.message ?: "Connection closed"}", false)
         } finally {
@@ -140,16 +160,21 @@ class RelayServer(
     }
 
     /**
-     * Tapped directly from UVC callback.
-     * Takes < 1 microsecond: replaces the latest frame reference without blocking the UVC ingestion thread.
+     * Tapped directly from UVC video callback.
+     * Non-blocking: drops older un-transmitted frame in conflated channel.
      */
     fun submitFrame(jpegBytes: ByteArray) {
         if (!isRunning.get() || _connectedClients.value == 0) return
+        videoChannel.trySend(jpegBytes)
+    }
 
-        latestFrame.set(jpegBytes)
-        synchronized(frameSignal) {
-            frameSignal.notify()
-        }
+    /**
+     * Tapped directly from Audio capture loop.
+     * Multiplexes PCM audio chunks into the same stream.
+     */
+    fun submitAudio(pcmBytes: ByteArray) {
+        if (!isRunning.get() || _connectedClients.value == 0) return
+        audioChannel.trySend(pcmBytes)
     }
 
     fun stop() {
@@ -170,10 +195,6 @@ class RelayServer(
         serverJob?.cancel()
         serverJob = null
 
-        latestFrame.set(null)
-        synchronized(frameSignal) {
-            frameSignal.notifyAll()
-        }
         onLog("TX-Relay", "TCP Server stopped", false)
     }
 }

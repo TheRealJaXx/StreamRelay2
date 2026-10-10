@@ -2,15 +2,18 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
-import android.graphics.SurfaceTexture
 import android.view.Surface
+import android.view.SurfaceHolder
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.model.CaptureTelemetry
 import com.example.model.LogEntry
 import com.example.model.StreamPreset
 import com.example.model.UsbDeviceInfo
+import com.example.relay.AudioCaptureEngine
+import com.example.relay.JpegUtils
 import com.example.relay.NetworkUtils
+import com.example.relay.OffscreenDrainer
 import com.example.relay.RelayClient
 import com.example.relay.RelayServer
 import com.example.relay.RelayServerService
@@ -40,7 +43,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     private val _logs = MutableStateFlow<List<LogEntry>>(emptyList())
     val logs: StateFlow<List<LogEntry>> = _logs.asStateFlow()
 
-    // Mode selection
+    // Mode selection - asked fresh on every launch
     private val _currentMode = MutableStateFlow(AppMode.UNSELECTED)
     val currentMode: StateFlow<AppMode> = _currentMode.asStateFlow()
 
@@ -76,15 +79,25 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         addLog(tag, message, isError)
     }
 
-    // TCP Relay Server (TX)
+    // Unified TCP Relay Server (TX) - Sends Video and Audio multiplexed over single port
     val relayServer = RelayServer { tag, message, isError ->
         addLog(tag, message, isError)
     }
 
-    // TCP Relay Client (RX)
+    // Unified TCP Relay Client (RX) - Receives Video and Audio simultaneously
     val relayClient = RelayClient { tag, message, isError ->
         addLog(tag, message, isError)
     }
+
+    // Capture Card Audio Engine (TX) - Captures USB Audio & plays through phone speaker
+    val audioCaptureEngine = AudioCaptureEngine(application) { tag, message, isError ->
+        addLog(tag, message, isError)
+    }
+
+    val isAudioStreaming: StateFlow<Boolean> = audioCaptureEngine.isCapturing
+    val isLocalAudioEnabled: StateFlow<Boolean> = audioCaptureEngine.isLocalPlaybackEnabled
+    val isAudioPlaying: StateFlow<Boolean> = relayClient.isAudioPlaying
+    val isRxMuted: StateFlow<Boolean> = relayClient.isMuted
 
     val connectedUsbDevices: StateFlow<List<UsbDeviceInfo>> = usbMonitor.connectedDevices
     val telemetry: StateFlow<CaptureTelemetry> = uvcCaptureEngine.telemetry
@@ -95,12 +108,25 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val rxBitmap = relayClient.currentBitmap
     val rxStats: StateFlow<RxStats> = relayClient.stats
 
-    init {
-        addLog("System", "Stream Relay initialized", false)
+    // Local Video Preview toggle on Transmitter (TX)
+    private val _isLocalPreviewEnabled = MutableStateFlow(false)
+    val isLocalPreviewEnabled: StateFlow<Boolean> = _isLocalPreviewEnabled.asStateFlow()
 
-        // Wire raw JPEG frames directly from UVC engine into TCP server
-        uvcCaptureEngine.onRawFrameCaptured = { jpegBytes ->
-            relayServer.submitFrame(jpegBytes)
+    private var currentLocalHolder: SurfaceHolder? = null
+    private var offscreenDrainer: OffscreenDrainer? = null
+
+    init {
+        addLog("System", "Stream Relay initialized (Unified Video + Audio)", false)
+
+        // Wire raw JPEG frames directly from UVC engine into unified TCP server
+        uvcCaptureEngine.onRawFrameCaptured = { rawBytes ->
+            val cleanJpeg = JpegUtils.extractCleanJpeg(rawBytes)
+            relayServer.submitFrame(cleanJpeg)
+        }
+
+        // Wire raw PCM audio chunks directly from Audio engine into unified TCP server
+        audioCaptureEngine.onAudioChunkCaptured = { pcmBytes ->
+            relayServer.submitAudio(pcmBytes)
         }
 
         // Auto-start capture when device connects/permission granted in TX mode
@@ -115,37 +141,61 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
         }
-
-        // Selection is requested fresh every launch (remember mode disabled)
     }
 
-    private var offscreenTexture: SurfaceTexture? = null
-    private var offscreenSurface: Surface? = null
-
     private fun ensureOffscreenSurface(): Surface {
-        val existing = offscreenSurface
-        if (existing != null && existing.isValid) {
-            return existing
+        var drainer = offscreenDrainer
+        if (drainer == null) {
+            drainer = OffscreenDrainer(1280, 720)
+            offscreenDrainer = drainer
         }
-        releaseOffscreenSurface()
-        val texture = SurfaceTexture(10).apply {
-            setDefaultBufferSize(1280, 720)
-        }
-        offscreenTexture = texture
-        val surface = Surface(texture)
-        offscreenSurface = surface
-        return surface
+        return drainer.surface
     }
 
     private fun releaseOffscreenSurface() {
         try {
-            offscreenSurface?.release()
+            offscreenDrainer?.release()
         } catch (_: Exception) {}
-        offscreenSurface = null
-        try {
-            offscreenTexture?.release()
-        } catch (_: Exception) {}
-        offscreenTexture = null
+        offscreenDrainer = null
+    }
+
+    fun setLocalPreviewEnabled(enabled: Boolean) {
+        _isLocalPreviewEnabled.value = enabled
+        if (enabled) {
+            val holder = currentLocalHolder
+            if (holder != null) {
+                releaseOffscreenSurface()
+                uvcCaptureEngine.setPreviewSurface(holder)
+            }
+        } else {
+            val offscreen = ensureOffscreenSurface()
+            uvcCaptureEngine.setPreviewSurface(offscreen)
+        }
+    }
+
+    fun setLocalPreviewHolder(holder: SurfaceHolder?) {
+        currentLocalHolder = holder
+        if (holder != null && _isLocalPreviewEnabled.value) {
+            releaseOffscreenSurface()
+            uvcCaptureEngine.setPreviewSurface(holder)
+        } else if (holder == null && _isLocalPreviewEnabled.value) {
+            val offscreen = ensureOffscreenSurface()
+            uvcCaptureEngine.setPreviewSurface(offscreen)
+        }
+    }
+
+    fun setLocalAudioEnabled(enabled: Boolean) {
+        audioCaptureEngine.setLocalPlaybackEnabled(enabled)
+    }
+
+    fun setRxMuted(muted: Boolean) {
+        relayClient.setMuted(muted)
+    }
+
+    fun onAudioPermissionGranted() {
+        if (_currentMode.value == AppMode.TX) {
+            audioCaptureEngine.start()
+        }
     }
 
     fun selectMode(mode: AppMode) {
@@ -156,13 +206,19 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 relayClient.disconnect()
                 refreshLocalIp()
                 usbMonitor.start()
-                val surface = ensureOffscreenSurface()
-                uvcCaptureEngine.setPreviewSurface(surface)
+                val targetSurface = if (_isLocalPreviewEnabled.value && currentLocalHolder != null) {
+                    currentLocalHolder!!
+                } else {
+                    ensureOffscreenSurface()
+                }
+                uvcCaptureEngine.setPreviewSurface(targetSurface)
                 uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
                 startTxRelayServer(_txPort.value)
                 startCapture()
             }
             AppMode.RX -> {
+                _isLocalPreviewEnabled.value = false
+                currentLocalHolder = null
                 stopTxRelayServer()
                 uvcCaptureEngine.stopCapture()
                 uvcCaptureEngine.setPreviewSurface(null)
@@ -170,6 +226,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 usbMonitor.stop()
             }
             AppMode.UNSELECTED -> {
+                _isLocalPreviewEnabled.value = false
+                currentLocalHolder = null
                 stopTxRelayServer()
                 relayClient.disconnect()
                 uvcCaptureEngine.stopCapture()
@@ -204,11 +262,13 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     fun startTxRelayServer(port: Int = _txPort.value) {
         refreshLocalIp()
         relayServer.start(port)
+        audioCaptureEngine.start()
         RelayServerService.start(getApplication())
     }
 
     fun stopTxRelayServer() {
         relayServer.stop()
+        audioCaptureEngine.stop()
         RelayServerService.stop(getApplication())
     }
 
@@ -278,11 +338,14 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         super.onCleared()
+        _isLocalPreviewEnabled.value = false
+        currentLocalHolder = null
         stopTxRelayServer()
         relayClient.disconnect()
         usbMonitor.stop()
         uvcCaptureEngine.setPreviewSurface(null)
         releaseOffscreenSurface()
         uvcCaptureEngine.release()
+        audioCaptureEngine.release()
     }
 }

@@ -2,10 +2,16 @@ package com.example.relay
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import android.os.Build
 import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,7 +23,6 @@ import java.io.DataInputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
 enum class RxConnectionState {
@@ -37,6 +42,12 @@ data class RxStats(
 class RelayClient(
     private val onLog: (tag: String, message: String, isError: Boolean) -> Unit
 ) {
+    companion object {
+        const val SAMPLE_RATE = 48000
+        const val CHANNEL_CONFIG = AudioFormat.CHANNEL_OUT_STEREO
+        const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+    }
+
     private val clientScope = CoroutineScope(Dispatchers.IO)
     private var connectionJob: Job? = null
     private var decoderJob: Job? = null
@@ -53,31 +64,49 @@ class RelayClient(
     private val _stats = MutableStateFlow(RxStats())
     val stats: StateFlow<RxStats> = _stats.asStateFlow()
 
-    // Holds only the latest un-decoded frame for 0-latency decoding
-    private val latestReceivedFrame = AtomicReference<ByteArray?>(null)
-    private val decodeSignal = Object()
+    private val _isAudioPlaying = MutableStateFlow(false)
+    val isAudioPlaying: StateFlow<Boolean> = _isAudioPlaying.asStateFlow()
+
+    private val _isMuted = MutableStateFlow(false)
+    val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
+
+    // Conflated channel holds only newest un-decoded video frame
+    private var videoReceiveChannel = Channel<ByteArray>(Channel.CONFLATED)
+
+    private var audioTrack: AudioTrack? = null
 
     private val bitmapOptions = BitmapFactory.Options().apply {
-        inPreferredConfig = Bitmap.Config.RGB_565 // Low memory & fast decoding
+        inPreferredConfig = Bitmap.Config.RGB_565
+        inMutable = true
     }
 
     private var targetHost: String = ""
     private var targetPort: Int = 4120
 
-    fun connect(host: String, port: Int) {
+    fun setMuted(muted: Boolean) {
+        _isMuted.value = muted
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                audioTrack?.setVolume(if (muted) 0f else 1f)
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun connect(host: String, port: Int = 4120) {
         disconnect()
 
         targetHost = host.trim()
         targetPort = port
         isManuallyStopped.set(false)
         isRunning.set(true)
+        videoReceiveChannel = Channel(Channel.CONFLATED)
 
         startDecoderThread()
 
         connectionJob = clientScope.launch {
             while (isRunning.get() && !isManuallyStopped.get()) {
                 _connectionState.value = RxConnectionState.CONNECTING
-                onLog("RX-Relay", "Connecting to $targetHost:$targetPort...", false)
+                onLog("RX-Relay", "Connecting to $targetHost:$targetPort (Video + Audio)...", false)
 
                 var socket: Socket? = null
                 try {
@@ -88,23 +117,34 @@ class RelayClient(
                     socket = s
 
                     _connectionState.value = RxConnectionState.CONNECTED
-                    onLog("RX-Relay", "Connected to transmitter! Streaming video...", false)
+                    onLog("RX-Relay", "Connected! Streaming synchronized video & audio...", false)
+
+                    initAudioTrack()
 
                     val inputStream = DataInputStream(BufferedInputStream(s.getInputStream(), 64 * 1024))
 
                     while (isRunning.get() && !s.isClosed && s.isConnected) {
+                        val packetType = inputStream.readByte()
                         val length = inputStream.readInt()
                         if (length <= 0 || length > 10_000_000) {
-                            throw IllegalStateException("Invalid frame length received: $length")
+                            throw IllegalStateException("Invalid packet length: $length (Type: $packetType)")
                         }
 
-                        val frameBytes = ByteArray(length)
-                        inputStream.readFully(frameBytes)
+                        val payload = ByteArray(length)
+                        inputStream.readFully(payload)
 
-                        // Immediately replace reference with newest frame, dropping older un-decoded frames
-                        latestReceivedFrame.set(frameBytes)
-                        synchronized(decodeSignal) {
-                            decodeSignal.notify()
+                        when (packetType) {
+                            RelayServer.PKT_TYPE_VIDEO -> {
+                                videoReceiveChannel.trySend(payload)
+                            }
+                            RelayServer.PKT_TYPE_AUDIO -> {
+                                if (!_isMuted.value) {
+                                    audioTrack?.write(payload, 0, payload.size)
+                                }
+                                if (!_isAudioPlaying.value) {
+                                    _isAudioPlaying.value = true
+                                }
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -112,9 +152,9 @@ class RelayClient(
                         onLog("RX-Relay", "Connection dropped: ${e.message ?: "Disconnected"}", true)
                     }
                 } finally {
-                    try {
-                        socket?.close()
-                    } catch (_: Exception) {}
+                    _isAudioPlaying.value = false
+                    releaseAudioTrack()
+                    try { socket?.close() } catch (_: Exception) {}
                 }
 
                 if (!isManuallyStopped.get()) {
@@ -129,6 +169,53 @@ class RelayClient(
         }
     }
 
+    private fun initAudioTrack() {
+        try {
+            val minBufSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT) * 2
+            val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AUDIO_FORMAT)
+                            .setSampleRate(SAMPLE_RATE)
+                            .setChannelMask(CHANNEL_CONFIG)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(minBufSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            } else {
+                @Suppress("DEPRECATION")
+                AudioTrack(
+                    AudioManager.STREAM_MUSIC,
+                    SAMPLE_RATE,
+                    CHANNEL_CONFIG,
+                    AUDIO_FORMAT,
+                    minBufSize,
+                    AudioTrack.MODE_STREAM
+                )
+            }
+            track.play()
+            audioTrack = track
+        } catch (e: Exception) {
+            onLog("RX-Relay", "AudioTrack init note: ${e.message}", false)
+        }
+    }
+
+    private fun releaseAudioTrack() {
+        try {
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (_: Exception) {}
+        audioTrack = null
+    }
+
     private fun startDecoderThread() {
         decoderJob?.cancel()
         decoderJob = clientScope.launch(Dispatchers.Default) {
@@ -137,21 +224,33 @@ class RelayClient(
             var totalCount = 0L
 
             while (isActive && isRunning.get()) {
-                var frame: ByteArray? = latestReceivedFrame.getAndSet(null)
+                val frame = videoReceiveChannel.receive()
 
-                if (frame == null) {
-                    synchronized(decodeSignal) {
-                        frame = latestReceivedFrame.getAndSet(null)
-                        if (frame == null) {
-                            decodeSignal.wait(50)
-                            frame = latestReceivedFrame.getAndSet(null)
+                if (frame.isNotEmpty()) {
+                    val cleanFrame = JpegUtils.extractCleanJpeg(frame)
+                    val decodeStart = SystemClock.elapsedRealtime()
+
+                    var decoded = try {
+                        BitmapFactory.decodeByteArray(cleanFrame, 0, cleanFrame.size, bitmapOptions)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (decoded == null) {
+                        decoded = try {
+                            BitmapFactory.decodeByteArray(cleanFrame, 0, cleanFrame.size)
+                        } catch (_: Exception) {
+                            null
                         }
                     }
-                }
+                    if (decoded == null) {
+                        val fallbackOpts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+                        decoded = try {
+                            BitmapFactory.decodeByteArray(cleanFrame, 0, cleanFrame.size, fallbackOpts)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
 
-                if (frame != null && frame.isNotEmpty()) {
-                    val decodeStart = SystemClock.elapsedRealtime()
-                    val decoded = BitmapFactory.decodeByteArray(frame, 0, frame.size, bitmapOptions)
                     val decodeTime = SystemClock.elapsedRealtime() - decodeStart
 
                     if (decoded != null) {
@@ -169,13 +268,13 @@ class RelayClient(
                             _stats.value = RxStats(
                                 fps = (currentFps * 10).roundToInt() / 10f,
                                 decodeTimeMs = decodeTime,
-                                frameSizeBytes = frame.size,
+                                frameSizeBytes = cleanFrame.size,
                                 totalFrames = totalCount
                             )
                         } else {
                             _stats.value = _stats.value.copy(
                                 decodeTimeMs = decodeTime,
-                                frameSizeBytes = frame.size,
+                                frameSizeBytes = cleanFrame.size,
                                 totalFrames = totalCount
                             )
                         }
@@ -189,6 +288,7 @@ class RelayClient(
         isManuallyStopped.set(true)
         isRunning.set(false)
         _connectionState.value = RxConnectionState.DISCONNECTED
+        _isAudioPlaying.value = false
 
         connectionJob?.cancel()
         connectionJob = null
@@ -196,10 +296,8 @@ class RelayClient(
         decoderJob?.cancel()
         decoderJob = null
 
-        latestReceivedFrame.set(null)
-        synchronized(decodeSignal) {
-            decodeSignal.notifyAll()
-        }
+        releaseAudioTrack()
+
         _currentBitmap.value = null
         onLog("RX-Relay", "Disconnected from server", false)
     }

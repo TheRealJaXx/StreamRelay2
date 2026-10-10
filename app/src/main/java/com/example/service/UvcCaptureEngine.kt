@@ -261,9 +261,10 @@ class UvcCaptureEngine(
     }
 
     fun setPreviewSurface(surface: Any?) {
-        if (currentSurface != null && surface == null) {
+        val old = currentSurface
+        if (old != null && old != surface) {
             try {
-                cameraHelper.removeSurface(currentSurface)
+                cameraHelper.removeSurface(old)
             } catch (_: Exception) {}
         }
         this.currentSurface = surface

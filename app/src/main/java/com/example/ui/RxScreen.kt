@@ -78,6 +78,8 @@ fun RxScreen(
     val stats by viewModel.rxStats.collectAsStateWithLifecycle()
     val targetIp by viewModel.rxTargetIp.collectAsStateWithLifecycle()
     val targetPort by viewModel.rxTargetPort.collectAsStateWithLifecycle()
+    val isAudioPlaying by viewModel.isAudioPlaying.collectAsStateWithLifecycle()
+    val isRxMuted by viewModel.isRxMuted.collectAsStateWithLifecycle()
 
     var inputIp by remember(targetIp) { mutableStateOf(targetIp) }
     var inputPort by remember(targetPort) { mutableStateOf(targetPort.toString()) }
@@ -256,6 +258,20 @@ fun RxScreen(
                                 style = MaterialTheme.typography.labelMedium,
                                 fontFamily = FontFamily.Monospace
                             )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .clickable { viewModel.setRxMuted(!isRxMuted) }
+                            ) {
+                                Text(
+                                    text = if (isRxMuted) "Audio: MUTED" else if (isAudioPlaying) "Audio: LIVE" else "Audio: Syncing",
+                                    color = if (isRxMuted) Color(0xFFF87171) else if (isAudioPlaying) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
