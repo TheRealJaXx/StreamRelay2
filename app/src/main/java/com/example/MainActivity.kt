@@ -8,6 +8,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -30,7 +31,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -54,9 +54,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.model.LogEntry
-import com.example.ui.CaptureScreen
-import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.CaptureViewModel
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -70,10 +70,8 @@ class MainActivity : ComponentActivity() {
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
         setContent {
-            MyApplicationTheme {
-                val viewModel = androidx.lifecycle.viewmodel.compose.viewModel<CaptureViewModel>()
-                CaptureScreen(viewModel = viewModel)
-            }
+            val viewModel: CaptureViewModel = viewModel()
+            CaptureScreen(viewModel = viewModel)
         }
     }
 }
@@ -224,7 +222,7 @@ fun CaptureScreen(
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
                                 text = "Capture monitor",
@@ -247,14 +245,17 @@ fun CaptureScreen(
                         Spacer(modifier = Modifier.height(8.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             listOf(480 to "480p", 720 to "720p", 1080 to "1080p").forEach { (res, label) ->
                                 val selected = selectedPreset.width == res
                                 Button(
                                     onClick = { viewModel.selectPreset(res) },
                                     modifier = Modifier.weight(1f),
-                                    enabled = true
+                                    enabled = true,
+                                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                        containerColor = if (selected) Color(0xFF4C8BF5) else Color(0xFF2B3844)
+                                    )
                                 ) {
                                     Text(label)
                                 }
@@ -322,7 +323,7 @@ fun CaptureScreen(
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             TextButton(onClick = { showLogs = true }) {
                                 Text("Logs")
@@ -356,7 +357,7 @@ fun CaptureScreen(
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text("Logs", color = Color.White, fontSize = 20.sp)
@@ -424,4 +425,3 @@ private fun LogRow(log: LogEntry) {
         )
     }
 }
-
