@@ -529,6 +529,24 @@ class RelayClient(
                         }
                     }
 
+                    // Fallback: Raw YUY2/NV21 frame arrived from network
+                    if (decoded == null && !JpegUtils.isJpeg(frame)) {
+                        val (w, h) = JpegUtils.resolveDimensions(frame.size, 1280, 720)
+                        val jpegBytes = JpegUtils.compressYuvToJpeg(frame, w, h)
+                        if (jpegBytes != null) {
+                            decoded = try {
+                                BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, bitmapOptions)
+                                    ?: BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+                            } catch (e: Exception) {
+                                decodeErrMsg = e.message
+                                null
+                            }
+                        }
+                        if (decoded == null) {
+                            decoded = JpegUtils.yuy2ToBitmap(frame, w, h)
+                        }
+                    }
+
                     val decodeTime = SystemClock.elapsedRealtime() - decodeStart
 
                     if (decoded != null) {

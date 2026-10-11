@@ -120,19 +120,22 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     init {
         addLog("System", "Stream Relay initialized (Separate Video & Audio Sockets)", false)
 
-        // Wire raw JPEG frames directly from UVC engine into TCP server
+        // Wire camera frames directly from UVC engine into TCP server
         uvcCaptureEngine.onRawFrameCaptured = { rawBytes ->
             relayServer.recordFrameCaptured()
 
-            val startsSoi = (rawBytes[0].toInt() and 0xFF) == 0xFF && (rawBytes[1].toInt() and 0xFF) == 0xD8
-            val endsEoi = rawBytes.size >= 2 &&
-                (rawBytes[rawBytes.size - 2].toInt() and 0xFF) == 0xFF &&
-                (rawBytes[rawBytes.size - 1].toInt() and 0xFF) == 0xD9
-
-            val frameToSend = if (startsSoi && endsEoi) {
-                rawBytes
+            val frameToSend = if (JpegUtils.isJpeg(rawBytes)) {
+                val endsEoi = rawBytes.size >= 2 &&
+                    (rawBytes[rawBytes.size - 2].toInt() and 0xFF) == 0xFF &&
+                    (rawBytes[rawBytes.size - 1].toInt() and 0xFF) == 0xD9
+                if (endsEoi) rawBytes else JpegUtils.extractCleanJpeg(rawBytes)
             } else {
-                JpegUtils.extractCleanJpeg(rawBytes)
+                // Buffer is uncompressed YUY2/NV21 from UVC camera (e.g. 1.84MB for 720p).
+                // Compress to compact JPEG (approx 70-100KB) for low latency and smooth 60fps streaming.
+                val telem = telemetry.value
+                val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
+                val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
+                JpegUtils.compressYuvToJpeg(rawBytes, w, h, quality = 80) ?: rawBytes
             }
             relayServer.submitFrame(frameToSend)
         }
