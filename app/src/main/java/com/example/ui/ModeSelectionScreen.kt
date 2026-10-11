@@ -43,6 +43,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Videocam
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ModeSelectionScreen(
@@ -73,54 +77,71 @@ fun ModeSelectionScreen(
             )
         }
     ) { innerPadding ->
+        val scrollState = rememberScrollState()
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+                .verticalScroll(scrollState)
+                .padding(horizontal = 20.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = "Select Device Role",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(6.dp))
             Text(
-                text = "Choose whether this device captures HDMI or displays the stream.",
+                text = "Choose whether this device relays the stream, receives it, or acts as a direct monitor.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
 
-            Spacer(modifier = Modifier.height(32.dp))
+            Spacer(modifier = Modifier.height(24.dp))
 
-            // TX Mode Card
+            // 1. TX Mode Card
             ModeOptionCard(
                 title = "Transmitter (TX)",
-                subtitle = "Honor 50 Phone with Capture Card",
-                description = "Ingests 720p 60fps MJPEG from PS3 HDMI over USB-C and hosts TCP relay server.",
-                badgeText = "Host / Server",
+                subtitle = "Phone with Capture Card · Network Relay",
+                description = "Captures HDMI video & audio from your console and streams to the receiver over Wi-Fi. Zero local preview overhead for ultra-low latency.",
+                badgeText = "Host / Streamer",
                 badgeColor = MaterialTheme.colorScheme.primary,
                 icon = Icons.Default.Cable,
                 iconTint = MaterialTheme.colorScheme.primary,
                 onClick = { onSelectMode(AppMode.TX) }
             )
 
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
 
-            // RX Mode Card
+            // 2. RX Mode Card
             ModeOptionCard(
                 title = "Receiver (RX)",
-                subtitle = "Tablet or Second Device",
-                description = "Connects to TX device over local Wi-Fi / LAN and renders the video fullscreen.",
-                badgeText = "Client / Viewer",
+                subtitle = "Second Phone, Tablet or Android TV",
+                description = "Connects to Transmitter over local Wi-Fi / LAN to receive and display low-latency live HDMI video and stereo audio.",
+                badgeText = "Display Client",
                 badgeColor = Color(0xFF10B981),
                 icon = Icons.Default.Tv,
                 iconTint = Color(0xFF10B981),
                 onClick = { onSelectMode(AppMode.RX) }
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // 3. Viewer Mode Card
+            ModeOptionCard(
+                title = "Viewer (Direct Monitor)",
+                subtitle = "Field Monitor · Direct HDMI Display",
+                description = "Directly watch and listen to your console or camera on this device. No network streaming required — supports full-screen mode.",
+                badgeText = "Direct Display",
+                badgeColor = Color(0xFFA855F7),
+                icon = Icons.Default.Videocam,
+                iconTint = Color(0xFFA855F7),
+                onClick = { onSelectMode(AppMode.VIEWER) }
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }

@@ -32,8 +32,9 @@ import java.util.Locale
 
 enum class AppMode {
     UNSELECTED,
-    TX, // Transmitter
-    RX  // Receiver
+    TX,     // Transmitter (Pure network relay)
+    RX,     // Receiver (Client display)
+    VIEWER  // Viewer (Direct local HDMI video & audio display)
 }
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
@@ -145,10 +146,10 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             relayServer.submitAudio(pcmBytes)
         }
 
-        // Auto-start capture when device connects/permission granted in TX mode
+        // Auto-start capture when device connects/permission granted in TX or VIEWER mode
         viewModelScope.launch {
             usbMonitor.connectedDevices.collect { devices ->
-                if (_currentMode.value == AppMode.TX && !telemetry.value.isStreaming) {
+                if ((_currentMode.value == AppMode.TX || _currentMode.value == AppMode.VIEWER) && !telemetry.value.isStreaming) {
                     val readyDevice = devices.firstOrNull { it.hasPermission && it.isUvcVideo }
                         ?: devices.firstOrNull { it.hasPermission }
                     if (readyDevice != null) {
@@ -173,6 +174,12 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             offscreenDrainer?.release()
         } catch (_: Exception) {}
         offscreenDrainer = null
+    }
+
+    fun setViewerSurface(holder: SurfaceHolder?) {
+        if (_currentMode.value == AppMode.VIEWER) {
+            uvcCaptureEngine.setPreviewSurface(holder)
+        }
     }
 
     fun setLocalPreviewEnabled(enabled: Boolean) {
@@ -209,7 +216,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onAudioPermissionGranted() {
-        if (_currentMode.value == AppMode.TX) {
+        if (_currentMode.value == AppMode.TX || _currentMode.value == AppMode.VIEWER) {
             audioCaptureEngine.start()
         }
     }
@@ -222,12 +229,9 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 relayClient.disconnect()
                 refreshLocalIp()
                 usbMonitor.start()
-                val targetSurface = if (_isLocalPreviewEnabled.value && currentLocalHolder != null) {
-                    currentLocalHolder!!
-                } else {
-                    ensureOffscreenSurface()
-                }
-                uvcCaptureEngine.setPreviewSurface(targetSurface)
+                // TX uses headless offscreen surface ONLY - zero preview rendering overhead
+                val offscreen = ensureOffscreenSurface()
+                uvcCaptureEngine.setPreviewSurface(offscreen)
                 uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
                 startTxRelayServer(_txPort.value)
                 startCapture()
@@ -239,7 +243,22 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 uvcCaptureEngine.stopCapture()
                 uvcCaptureEngine.setPreviewSurface(null)
                 releaseOffscreenSurface()
+                audioCaptureEngine.stop()
                 usbMonitor.stop()
+            }
+            AppMode.VIEWER -> {
+                _isLocalPreviewEnabled.value = false
+                currentLocalHolder = null
+                stopTxRelayServer()
+                relayClient.disconnect()
+                releaseOffscreenSurface()
+                refreshLocalIp()
+                usbMonitor.start()
+                // Local HDMI audio plays through phone speaker
+                audioCaptureEngine.setLocalPlaybackEnabled(true)
+                audioCaptureEngine.start()
+                uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
+                startCapture()
             }
             AppMode.UNSELECTED -> {
                 _isLocalPreviewEnabled.value = false
@@ -249,6 +268,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 uvcCaptureEngine.stopCapture()
                 uvcCaptureEngine.setPreviewSurface(null)
                 releaseOffscreenSurface()
+                audioCaptureEngine.stop()
                 usbMonitor.stop()
             }
         }
