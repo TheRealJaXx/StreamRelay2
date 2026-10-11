@@ -135,7 +135,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 val telem = telemetry.value
                 val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
                 val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
-                JpegUtils.compressYuvToJpeg(rawBytes, w, h, quality = 80) ?: rawBytes
+                JpegUtils.compressYuvToJpeg(rawBytes, w, h, quality = 92) ?: rawBytes
             }
             relayServer.submitFrame(frameToSend)
         }

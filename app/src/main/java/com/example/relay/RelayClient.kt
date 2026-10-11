@@ -115,7 +115,7 @@ class RelayClient(
     private var audioJitterBufferedBytes = 0
 
     private val bitmapOptions = BitmapFactory.Options().apply {
-        inPreferredConfig = Bitmap.Config.RGB_565
+        inPreferredConfig = Bitmap.Config.ARGB_8888
         inMutable = true
     }
 

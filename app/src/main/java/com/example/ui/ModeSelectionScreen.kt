@@ -1,5 +1,6 @@
 package com.example.ui
 
+import com.example.BuildConfig
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -60,7 +61,7 @@ fun ModeSelectionScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Milestone 2 · Network Relay",
+                            text = "Milestone 2 · Network Relay · v${BuildConfig.VERSION_NAME}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )

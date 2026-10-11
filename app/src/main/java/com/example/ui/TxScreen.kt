@@ -1,17 +1,29 @@
 package com.example.ui
 
+import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.WindowManager
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,8 +40,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Router
+import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.Videocam
@@ -41,6 +56,7 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -58,6 +74,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,6 +83,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -100,112 +118,135 @@ fun TxScreen(
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
     var showPortDialog by remember { mutableStateOf(false) }
+    var isFullscreenPreview by remember { mutableStateOf(false) }
 
-    Scaffold(
-        modifier = modifier.fillMaxSize(),
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            text = "Stream Relay TX",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Transmitter · Port $txPort",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onChangeMode) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Switch mode"
-                        )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.refreshLocalIp() }) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = "Refresh network IP"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
-            )
-        }
-    ) { innerPadding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            // Big Network IP Banner Card
-            item {
-                LocalIpBannerCard(
-                    localIp = localIp,
-                    port = txPort,
-                    isServerActive = isServerActive,
-                    connectedClients = connectedClients,
-                    onEditPort = { showPortDialog = true }
-                )
-            }
+    // Intercept back button when in fullscreen preview to return to dashboard
+    BackHandler(enabled = isFullscreenPreview) {
+        isFullscreenPreview = false
+    }
 
-            // Client Connection Status Card
-            item {
-                ClientConnectionStatusCard(
-                    connectedClients = connectedClients,
-                    isServerActive = isServerActive
+    if (isFullscreenPreview) {
+        TxFullscreenPreview(
+            telemetry = telemetry,
+            txPort = txPort,
+            connectedClients = connectedClients,
+            isAudioEnabled = isLocalAudioEnabled,
+            onToggleAudio = { enabled -> viewModel.setLocalAudioEnabled(enabled) },
+            onExitFullscreen = { isFullscreenPreview = false },
+            onSurfaceReady = { holder -> viewModel.setLocalPreviewHolder(holder) },
+            onSurfaceDestroyed = { viewModel.setLocalPreviewHolder(null) }
+        )
+    } else {
+        Scaffold(
+            modifier = modifier.fillMaxSize(),
+            topBar = {
+                CenterAlignedTopAppBar(
+                    title = {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "Stream Relay TX",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                text = "Transmitter · Port $txPort",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onChangeMode) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Switch mode"
+                            )
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { viewModel.refreshLocalIp() }) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Refresh network IP"
+                            )
+                        }
+                    },
+                    colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
                 )
             }
+        ) { innerPadding ->
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Big Network IP Banner Card
+                item {
+                    LocalIpBannerCard(
+                        localIp = localIp,
+                        port = txPort,
+                        isServerActive = isServerActive,
+                        connectedClients = connectedClients,
+                        onEditPort = { showPortDialog = true }
+                    )
+                }
 
-            // Capture Card Telemetry
-            item {
-                TxTelemetryCard(
-                    telemetry = telemetry,
-                    usbDevice = uvcDevice,
-                    isAudioStreaming = isAudioStreaming,
-                    onRequestUsbPermission = { vid, pid ->
-                        viewModel.requestUsbPermission(vid, pid)
-                    }
-                )
-            }
+                // Client Connection Status Card
+                item {
+                    ClientConnectionStatusCard(
+                        connectedClients = connectedClients,
+                        isServerActive = isServerActive
+                    )
+                }
 
-            // Requirement E: TX On-Screen Diagnostics Card
-            item {
-                TxRelayDiagnosticsCard(txStats = txStats)
-            }
+                // Capture Card Telemetry
+                item {
+                    TxTelemetryCard(
+                        telemetry = telemetry,
+                        usbDevice = uvcDevice,
+                        isAudioStreaming = isAudioStreaming,
+                        onRequestUsbPermission = { vid, pid ->
+                            viewModel.requestUsbPermission(vid, pid)
+                        }
+                    )
+                }
 
-            // Live Video Preview Card with Enable / Disable Toggle
-            item {
-                TxPreviewCard(
-                    isPreviewEnabled = isLocalPreviewEnabled,
-                    isAudioEnabled = isLocalAudioEnabled,
-                    onTogglePreview = { enabled -> viewModel.setLocalPreviewEnabled(enabled) },
-                    onToggleAudio = { enabled -> viewModel.setLocalAudioEnabled(enabled) },
-                    onSurfaceReady = { holder -> viewModel.setLocalPreviewHolder(holder) },
-                    onSurfaceDestroyed = { viewModel.setLocalPreviewHolder(null) }
-                )
-            }
+                // Requirement E: TX On-Screen Diagnostics Card
+                item {
+                    TxRelayDiagnosticsCard(txStats = txStats)
+                }
 
-            // Hardware Diagnostic Logs
-            item {
-                DiagnosticLogsSection(
-                    logs = logs,
-                    onClearLogs = { viewModel.clearLogs() }
-                )
-            }
+                // Live Video Preview Card with Enable / Disable Toggle and Full Screen Mode
+                item {
+                    TxPreviewCard(
+                        isPreviewEnabled = isLocalPreviewEnabled,
+                        isAudioEnabled = isLocalAudioEnabled,
+                        onTogglePreview = { enabled -> viewModel.setLocalPreviewEnabled(enabled) },
+                        onToggleAudio = { enabled -> viewModel.setLocalAudioEnabled(enabled) },
+                        onEnterFullscreen = {
+                            viewModel.setLocalPreviewEnabled(true)
+                            isFullscreenPreview = true
+                        },
+                        onSurfaceReady = { holder -> viewModel.setLocalPreviewHolder(holder) },
+                        onSurfaceDestroyed = { viewModel.setLocalPreviewHolder(null) }
+                    )
+                }
 
-            item {
-                Spacer(modifier = Modifier.height(32.dp))
+                // Hardware Diagnostic Logs
+                item {
+                    DiagnosticLogsSection(
+                        logs = logs,
+                        onClearLogs = { viewModel.clearLogs() }
+                    )
+                }
+
+                item {
+                    Spacer(modifier = Modifier.height(32.dp))
+                }
             }
         }
     }
@@ -637,6 +678,7 @@ private fun TxPreviewCard(
     isAudioEnabled: Boolean,
     onTogglePreview: (Boolean) -> Unit,
     onToggleAudio: (Boolean) -> Unit,
+    onEnterFullscreen: () -> Unit,
     onSurfaceReady: (SurfaceHolder) -> Unit,
     onSurfaceDestroyed: () -> Unit
 ) {
@@ -670,16 +712,35 @@ private fun TxPreviewCard(
                     )
                 }
 
-                FilledTonalButton(
-                    onClick = { onTogglePreview(!isPreviewEnabled) }
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (isPreviewEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isPreviewEnabled) "Hide Preview" else "Show Preview")
+                    Button(
+                        onClick = onEnterFullscreen,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Fullscreen,
+                            contentDescription = "Full Screen",
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Full Screen")
+                    }
+
+                    FilledTonalButton(
+                        onClick = { onTogglePreview(!isPreviewEnabled) },
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (isPreviewEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(if (isPreviewEnabled) "Hide" else "Show")
+                    }
                 }
             }
 
@@ -715,6 +776,27 @@ private fun TxPreviewCard(
                             }
                         }
                     )
+
+                    // Floating Full Screen Button inside video box
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp),
+                        shape = CircleShape,
+                        color = Color.Black.copy(alpha = 0.65f),
+                        contentColor = Color.White
+                    ) {
+                        IconButton(
+                            onClick = onEnterFullscreen,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Fullscreen,
+                                contentDescription = "Go Full Screen",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(10.dp))
@@ -760,20 +842,286 @@ private fun TxPreviewCard(
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
                 ) {
                     Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.VideocamOff,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = "Local preview is hidden. Capture card continues relaying over network.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.VideocamOff,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "Local preview is hidden. Capture card continues relaying over network.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Button(
+                            onClick = onEnterFullscreen,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Fullscreen,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Full Screen")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TxFullscreenPreview(
+    telemetry: CaptureTelemetry,
+    txPort: Int,
+    connectedClients: Int,
+    isAudioEnabled: Boolean,
+    onToggleAudio: (Boolean) -> Unit,
+    onExitFullscreen: () -> Unit,
+    onSurfaceReady: (SurfaceHolder) -> Unit,
+    onSurfaceDestroyed: () -> Unit
+) {
+    val context = LocalContext.current
+    val activity = context as? Activity
+    var showOverlay by remember { mutableStateOf(true) }
+    var isForcedLandscape by remember { mutableStateOf(false) }
+
+    // Keep screen on while in fullscreen preview
+    DisposableEffect(Unit) {
+        val window = activity?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // Handle landscape orientation toggle
+    DisposableEffect(isForcedLandscape) {
+        if (isForcedLandscape) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        } else {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        onDispose {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                showOverlay = !showOverlay
+            }
+    ) {
+        // Video presentation fitting container and preserving aspect ratio
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            val containerAspect = maxWidth / maxHeight
+            val videoAspect = if (telemetry.resolutionWidth > 0 && telemetry.resolutionHeight > 0) {
+                telemetry.resolutionWidth.toFloat() / telemetry.resolutionHeight.toFloat()
+            } else {
+                16f / 9f
+            }
+
+            val videoModifier = if (containerAspect > videoAspect) {
+                Modifier
+                    .fillMaxHeight()
+                    .aspectRatio(videoAspect)
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(videoAspect)
+            }
+
+            AndroidView(
+                modifier = videoModifier,
+                factory = { ctx ->
+                    SurfaceView(ctx).apply {
+                        holder.addCallback(object : SurfaceHolder.Callback {
+                            override fun surfaceCreated(holder: SurfaceHolder) {
+                                onSurfaceReady(holder)
+                            }
+
+                            override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                onSurfaceReady(holder)
+                            }
+
+                            override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                onSurfaceDestroyed()
+                            }
+                        })
+                    }
+                }
+            )
+        }
+
+        // Animated HUD Controls Overlay
+        AnimatedVisibility(
+            visible = showOverlay,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .padding(16.dp)
+            ) {
+                // Top Bar with back/exit, status badges, and rotation toggle
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                        ) {
+                            IconButton(onClick = onExitFullscreen) {
+                                Icon(
+                                    imageVector = Icons.Default.FullscreenExit,
+                                    contentDescription = "Exit Full Screen",
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+
+                        Column {
+                            Text(
+                                text = "TX Fullscreen Preview",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White
+                            )
+                            Text(
+                                text = "Port $txPort · Tap screen to hide controls",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFCBD5E1)
+                            )
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // FPS Pill
+                        Surface(
+                            color = if (telemetry.isStreaming && telemetry.fps > 0f) Color(0xFF10B981).copy(alpha = 0.25f) else Color(0xFF64748B).copy(alpha = 0.25f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, if (telemetry.isStreaming && telemetry.fps > 0f) Color(0xFF10B981) else Color(0xFF64748B))
+                        ) {
+                            Text(
+                                text = if (telemetry.isStreaming) "${telemetry.fps} FPS" else "0 FPS",
+                                color = if (telemetry.isStreaming && telemetry.fps > 0f) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        // Client indicator pill
+                        Surface(
+                            color = if (connectedClients > 0) Color(0xFF10B981).copy(alpha = 0.25f) else Color(0xFF64748B).copy(alpha = 0.25f),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text(
+                                text = if (connectedClients > 0) "$connectedClients Client(s)" else "No Clients",
+                                color = if (connectedClients > 0) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+
+                        // Orientation rotation button
+                        Surface(
+                            shape = CircleShape,
+                            color = if (isForcedLandscape) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                        ) {
+                            IconButton(onClick = { isForcedLandscape = !isForcedLandscape }) {
+                                Icon(
+                                    imageVector = Icons.Default.ScreenRotation,
+                                    contentDescription = "Toggle Landscape Rotation",
+                                    tint = if (isForcedLandscape) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Bottom Floating Control Bar
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 12.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color(0xFF1E293B).copy(alpha = 0.9f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        // Speaker toggle
+                        FilledTonalButton(
+                            onClick = { onToggleAudio(!isAudioEnabled) },
+                            colors = ButtonDefaults.filledTonalButtonColors(
+                                containerColor = if (isAudioEnabled) MaterialTheme.colorScheme.primaryContainer else Color(0xFF334155)
+                            )
+                        ) {
+                            Icon(
+                                imageVector = if (isAudioEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(if (isAudioEnabled) "Phone Speaker: ON" else "Speaker MUTED")
+                        }
+
+                        // Exit button
+                        OutlinedButton(
+                            onClick = onExitFullscreen,
+                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF64748B))
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FullscreenExit,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = Color.White
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Exit Full Screen", color = Color.White)
+                        }
                     }
                 }
             }
