@@ -25,12 +25,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.Tv
-import androidx.compose.material.icons.filled.Wifi
-import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -111,7 +108,7 @@ fun RxScreen(
         if (bitmap != null) {
             Image(
                 bitmap = bitmap!!.asImageBitmap(),
-                contentDescription = "Relayed PS3 Video Feed",
+                contentDescription = "Relayed Video Feed",
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Fit
             )
@@ -130,9 +127,9 @@ fun RxScreen(
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
                     text = when (connectionState) {
-                        RxConnectionState.CONNECTING -> "Connecting to Transmitter..."
-                        RxConnectionState.RECONNECTING -> "Transmitter disconnected. Reconnecting in 2s..."
-                        RxConnectionState.CONNECTED -> "Waiting for first frame..."
+                        RxConnectionState.CONNECTING -> stats.statusDetail
+                        RxConnectionState.RECONNECTING -> stats.statusDetail
+                        RxConnectionState.CONNECTED -> if (stats.videoPacketsReceived == 0L) stats.statusDetail else "Waiting for video frame..."
                         RxConnectionState.DISCONNECTED -> "Receiver Ready"
                     },
                     color = Color(0xFF94A3B8),
@@ -196,7 +193,7 @@ fun RxScreen(
                     val (badgeText, badgeBg, badgeFg) = when (connectionState) {
                         RxConnectionState.CONNECTED -> Triple("CONNECTED", Color(0xFF10B981).copy(alpha = 0.2f), Color(0xFF10B981))
                         RxConnectionState.CONNECTING -> Triple("CONNECTING...", Color(0xFFF59E0B).copy(alpha = 0.2f), Color(0xFFF59E0B))
-                        RxConnectionState.RECONNECTING -> Triple("RETRYING (2s)", Color(0xFFEF4444).copy(alpha = 0.2f), Color(0xFFEF4444))
+                        RxConnectionState.RECONNECTING -> Triple("RETRYING", Color(0xFFEF4444).copy(alpha = 0.2f), Color(0xFFEF4444))
                         RxConnectionState.DISCONNECTED -> Triple("OFFLINE", Color(0xFF64748B).copy(alpha = 0.2f), Color(0xFF94A3B8))
                     }
 
@@ -226,50 +223,140 @@ fun RxScreen(
                     }
                 }
 
-                // Middle Stats HUD (when connected)
-                if (connectionState == RxConnectionState.CONNECTED) {
+                // Requirement E: Comprehensive Diagnostics Panel (visible in the RX stats panel)
+                if (connectionState != RxConnectionState.DISCONNECTED || stats.videoPacketsReceived > 0L) {
                     Surface(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(top = 64.dp),
                         shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFF0F172A).copy(alpha = 0.85f)
+                        color = Color(0xFF0F172A).copy(alpha = 0.90f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(14.dp)
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Text(
-                                text = "FPS: ${stats.fps}",
-                                color = Color(0xFF38BDF8),
-                                style = MaterialTheme.typography.labelMedium,
-                                fontFamily = FontFamily.Monospace,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Decode: ${stats.decodeTimeMs}ms",
-                                color = Color(0xFFA7F3D0),
-                                style = MaterialTheme.typography.labelMedium,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Text(
-                                text = "Frame: ${stats.frameSizeBytes / 1024}KB",
-                                color = Color(0xFFFDE68A),
-                                style = MaterialTheme.typography.labelMedium,
-                                fontFamily = FontFamily.Monospace
-                            )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(6.dp))
-                                    .clickable { viewModel.setRxMuted(!isRxMuted) }
-                            ) {
+                            // Line 1: Primary FPS & Audio Status
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Text(
-                                    text = if (isRxMuted) "Audio: MUTED" else if (isAudioPlaying) "Audio: LIVE" else "Audio: Syncing",
-                                    color = if (isRxMuted) Color(0xFFF87171) else if (isAudioPlaying) Color(0xFF34D399) else Color(0xFF94A3B8),
-                                    style = MaterialTheme.typography.labelMedium,
+                                    text = "FPS: ${stats.fps}",
+                                    color = Color(0xFF38BDF8),
+                                    style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Decode: ${stats.decodeTimeMs}ms",
+                                    color = Color(0xFFA7F3D0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "Frame: ${stats.frameSizeBytes / 1024}KB",
+                                    color = Color(0xFFFDE68A),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .clickable { viewModel.setRxMuted(!isRxMuted) }
+                                ) {
+                                    Text(
+                                        text = if (isRxMuted) "Audio: MUTED" else if (isAudioPlaying) "Audio: LIVE" else "Audio: Wait",
+                                        color = if (isRxMuted) Color(0xFFF87171) else if (isAudioPlaying) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+
+                            // Line 2: Packet Counters & Throughput
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    text = "Video Pkts: ${stats.videoPacketsReceived}",
+                                    color = Color(0xFFE2E8F0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "${stats.videoBytesPerSecond / 1024} kB/s",
+                                    color = Color(0xFF38BDF8),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "Audio Pkts: ${stats.audioPacketsReceived}",
+                                    color = Color(0xFFE2E8F0),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "Last: ${if (stats.secondsSinceLastVideoPacket >= 0) "${stats.secondsSinceLastVideoPacket}s" else "--"}",
+                                    color = if (stats.secondsSinceLastVideoPacket > 2f) Color(0xFFF87171) else Color(0xFF94A3B8),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+
+                            // Line 3: Frame Structure Validation
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    text = "Head: [${stats.lastFrameFirst4BytesHex}]",
+                                    color = Color(0xFFCBD5E1),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "Ends FF D9: ${if (stats.lastFrameEndsEoi) "YES" else "NO"}",
+                                    color = if (stats.lastFrameEndsEoi) Color(0xFF34D399) else Color(0xFFF87171),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Bmp: ${stats.decodedBitmapSize}",
+                                    color = Color(0xFF38BDF8),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+
+                            // Line 4: Decode Success & Failures
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    text = "Decode OK: ${stats.decodeSuccesses}",
+                                    color = Color(0xFF34D399),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "Fail: ${stats.decodeFailures}",
+                                    color = if (stats.decodeFailures > 0) Color(0xFFF87171) else Color(0xFF94A3B8),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                if (stats.lastDecodeError != "None") {
+                                    Text(
+                                        text = "Err: ${stats.lastDecodeError}",
+                                        color = Color(0xFFF87171),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+
+                            // Line 5: Status detail message if warning/error/info
+                            if (stats.statusDetail.isNotBlank() && stats.statusDetail != "Connected") {
+                                Text(
+                                    text = "Status: ${stats.statusDetail}",
+                                    color = if (stats.statusDetail.startsWith("ERROR") || stats.statusDetail.contains("refused") || stats.statusDetail.contains("timed out")) Color(0xFFF87171) else Color(0xFF94A3B8),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 2
                                 )
                             }
                         }
@@ -331,7 +418,24 @@ fun RxScreen(
                             )
                         }
 
-                        Spacer(modifier = Modifier.height(12.dp))
+                        // Detailed Status Notice (Distinguishes timeout, connection refused, watchdog)
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = stats.statusDetail,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = when {
+                                stats.statusDetail.contains("timed out", ignoreCase = true) -> Color(0xFFF87171)
+                                stats.statusDetail.contains("refused", ignoreCase = true) -> Color(0xFFF87171)
+                                stats.statusDetail.contains("failed", ignoreCase = true) -> Color(0xFFF87171)
+                                stats.statusDetail.contains("no data received", ignoreCase = true) -> Color(0xFFFBBF24)
+                                stats.statusDetail.contains("Connected", ignoreCase = true) -> Color(0xFF34D399)
+                                else -> Color(0xFF94A3B8)
+                            },
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Medium
+                        )
+
+                        Spacer(modifier = Modifier.height(10.dp))
 
                         if (connectionState == RxConnectionState.CONNECTED || connectionState == RxConnectionState.CONNECTING || connectionState == RxConnectionState.RECONNECTING) {
                             Button(

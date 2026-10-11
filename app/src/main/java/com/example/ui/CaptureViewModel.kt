@@ -19,6 +19,7 @@ import com.example.relay.RelayServer
 import com.example.relay.RelayServerService
 import com.example.relay.RxConnectionState
 import com.example.relay.RxStats
+import com.example.relay.TxRelayStats
 import com.example.service.UvcCaptureEngine
 import com.example.service.UsbMonitor
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -103,6 +104,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val telemetry: StateFlow<CaptureTelemetry> = uvcCaptureEngine.telemetry
     val txConnectedClients: StateFlow<Int> = relayServer.connectedClients
     val isTxServerActive: StateFlow<Boolean> = relayServer.isServerActive
+    val txStats: StateFlow<TxRelayStats> = relayServer.txStats
 
     val rxConnectionState: StateFlow<RxConnectionState> = relayClient.connectionState
     val rxBitmap = relayClient.currentBitmap
@@ -116,15 +118,26 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     private var offscreenDrainer: OffscreenDrainer? = null
 
     init {
-        addLog("System", "Stream Relay initialized (Unified Video + Audio)", false)
+        addLog("System", "Stream Relay initialized (Separate Video & Audio Sockets)", false)
 
-        // Wire raw JPEG frames directly from UVC engine into unified TCP server
+        // Wire raw JPEG frames directly from UVC engine into TCP server
         uvcCaptureEngine.onRawFrameCaptured = { rawBytes ->
-            val cleanJpeg = JpegUtils.extractCleanJpeg(rawBytes)
-            relayServer.submitFrame(cleanJpeg)
+            relayServer.recordFrameCaptured()
+
+            val startsSoi = (rawBytes[0].toInt() and 0xFF) == 0xFF && (rawBytes[1].toInt() and 0xFF) == 0xD8
+            val endsEoi = rawBytes.size >= 2 &&
+                (rawBytes[rawBytes.size - 2].toInt() and 0xFF) == 0xFF &&
+                (rawBytes[rawBytes.size - 1].toInt() and 0xFF) == 0xD9
+
+            val frameToSend = if (startsSoi && endsEoi) {
+                rawBytes
+            } else {
+                JpegUtils.extractCleanJpeg(rawBytes)
+            }
+            relayServer.submitFrame(frameToSend)
         }
 
-        // Wire raw PCM audio chunks directly from Audio engine into unified TCP server
+        // Wire raw PCM audio chunks directly from Audio engine into Audio TCP server
         audioCaptureEngine.onAudioChunkCaptured = { pcmBytes ->
             relayServer.submitAudio(pcmBytes)
         }

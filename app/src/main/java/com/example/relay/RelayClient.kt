@@ -20,9 +20,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.BufferedInputStream
 import java.io.DataInputStream
+import java.io.IOException
+import java.net.ConnectException
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
+import java.util.ArrayDeque
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
 
 enum class RxConnectionState {
@@ -33,10 +38,20 @@ enum class RxConnectionState {
 }
 
 data class RxStats(
+    val videoPacketsReceived: Long = 0L,
+    val videoBytesPerSecond: Long = 0L,
+    val audioPacketsReceived: Long = 0L,
+    val secondsSinceLastVideoPacket: Float = 0f,
+    val decodeSuccesses: Long = 0L,
+    val decodeFailures: Long = 0L,
+    val lastDecodeError: String = "None",
+    val lastFrameFirst4BytesHex: String = "--",
+    val lastFrameEndsEoi: Boolean = false,
+    val decodedBitmapSize: String = "--",
     val fps: Float = 0f,
     val decodeTimeMs: Long = 0L,
     val frameSizeBytes: Int = 0,
-    val totalFrames: Long = 0L
+    val statusDetail: String = "Disconnected"
 )
 
 class RelayClient(
@@ -44,16 +59,36 @@ class RelayClient(
 ) {
     companion object {
         const val SAMPLE_RATE = 48000
-        const val CHANNEL_CONFIG = AudioFormat.CHANNEL_OUT_STEREO
+        const val CHANNEL_CONFIG_OUT = AudioFormat.CHANNEL_OUT_STEREO
         const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+
+        // 1 ms of 48kHz stereo 16-bit = 48 * 4 = 192 bytes
+        // 20ms chunk = 3840 bytes
+        const val BYTES_PER_MS = 192
+        const val JITTER_TARGET_MIN_BYTES = BYTES_PER_MS * 60   // ~60 ms buffer before playback begins
+        const val JITTER_TARGET_MAX_BYTES = BYTES_PER_MS * 120  // ~120 ms max buffer before dropping oldest
+        const val SILENCE_CHUNK_BYTES = BYTES_PER_MS * 20      // 20 ms silence chunk (3840 bytes)
     }
 
     private val clientScope = CoroutineScope(Dispatchers.IO)
-    private var connectionJob: Job? = null
+    private var videoJob: Job? = null
+    private var audioJob: Job? = null
     private var decoderJob: Job? = null
+    private var audioPlaybackJob: Job? = null
+    private var watchdogJob: Job? = null
 
     private val isRunning = AtomicBoolean(false)
     private val isManuallyStopped = AtomicBoolean(false)
+
+    // Requirement D: Keep the video and audio socket references as fields
+    @Volatile
+    private var videoSocket: Socket? = null
+
+    @Volatile
+    private var audioSocket: Socket? = null
+
+    // Requirement D: Connection generation id so an old loop exits and cannot touch new state
+    private val connectionGeneration = AtomicInteger(0)
 
     private val _connectionState = MutableStateFlow(RxConnectionState.DISCONNECTED)
     val connectionState: StateFlow<RxConnectionState> = _connectionState.asStateFlow()
@@ -70,18 +105,41 @@ class RelayClient(
     private val _isMuted = MutableStateFlow(false)
     val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
 
-    // Conflated channel holds only newest un-decoded video frame
     private var videoReceiveChannel = Channel<ByteArray>(Channel.CONFLATED)
 
     private var audioTrack: AudioTrack? = null
+
+    // Requirement C: Audio Jitter Buffer structures
+    private val audioJitterLock = Any()
+    private val audioJitterQueue = ArrayDeque<ByteArray>()
+    private var audioJitterBufferedBytes = 0
 
     private val bitmapOptions = BitmapFactory.Options().apply {
         inPreferredConfig = Bitmap.Config.RGB_565
         inMutable = true
     }
 
-    private var targetHost: String = ""
-    private var targetPort: Int = 4120
+    // Diagnostics state variables
+    private var videoPacketsCount = 0L
+    private var audioPacketsCount = 0L
+    private var decodeSuccessCount = 0L
+    private var decodeFailureCount = 0L
+    private var lastDecodeErrorMsg = "None"
+    private var lastHex4 = "--"
+    private var lastEndsEoi = false
+    private var lastBmpSize = "--"
+    private var lastVideoPacketTimestamp = 0L
+    private var videoBytesCounter = 0L
+    private var lastStatsUpdateTimestamp = 0L
+    private var lastDecodeFailLogTimestamp = 0L
+    private var connectionStartTimestamp = 0L
+    private var statusDetailMessage = "Disconnected"
+
+    @Volatile
+    private var isVideoSocketConnected = false
+
+    @Volatile
+    private var isAudioSocketConnected = false
 
     fun setMuted(muted: Boolean) {
         _isMuted.value = muted
@@ -92,102 +150,300 @@ class RelayClient(
         } catch (_: Exception) {}
     }
 
+    /**
+     * Requirement D: connect() must fully stop any previous connection first (use connection generation id).
+     */
     fun connect(host: String, port: Int = 4120) {
-        disconnect()
+        val gen = connectionGeneration.incrementAndGet()
+        internalStopPrevious()
 
-        targetHost = host.trim()
-        targetPort = port
+        val targetHost = host.trim()
+        val videoPort = port
+        val audioPort = port + 1
+
         isManuallyStopped.set(false)
         isRunning.set(true)
         videoReceiveChannel = Channel(Channel.CONFLATED)
 
-        startDecoderThread()
+        resetDiagnostics()
+        statusDetailMessage = "Connecting to $targetHost:$videoPort..."
+        _connectionState.value = RxConnectionState.CONNECTING
+        updateStatsState(force = true)
 
-        connectionJob = clientScope.launch {
-            while (isRunning.get() && !isManuallyStopped.get()) {
-                _connectionState.value = RxConnectionState.CONNECTING
-                onLog("RX-Relay", "Connecting to $targetHost:$targetPort (Video + Audio)...", false)
+        // 1. Dedicated Decoder Coroutine (runs on background thread, never blocks network read)
+        startDecoderThread(gen)
 
-                var socket: Socket? = null
-                try {
-                    val s = Socket()
-                    s.tcpNoDelay = true
-                    s.receiveBufferSize = 256 * 1024
-                    s.connect(InetSocketAddress(targetHost, targetPort), 4000)
-                    socket = s
+        // 2. Dedicated Audio Playback Coroutine with Jitter Buffer (Requirement C)
+        startAudioPlaybackThread(gen)
 
-                    _connectionState.value = RxConnectionState.CONNECTED
-                    onLog("RX-Relay", "Connected! Streaming synchronized video & audio...", false)
+        // 3. Audio Socket Connection Loop (Port P + 1)
+        audioJob = clientScope.launch {
+            runAudioLoop(targetHost, audioPort, gen)
+        }
 
-                    initAudioTrack()
+        // 4. Video Socket Connection Loop (Port P)
+        videoJob = clientScope.launch {
+            runVideoLoop(targetHost, videoPort, gen)
+        }
 
-                    val inputStream = DataInputStream(BufferedInputStream(s.getInputStream(), 64 * 1024))
+        // 5. Watchdog for 3-second data timeout & single-socket errors
+        watchdogJob = clientScope.launch {
+            while (isActive && isRunning.get() && gen == connectionGeneration.get()) {
+                delay(500)
+                val now = SystemClock.elapsedRealtime()
 
-                    while (isRunning.get() && !s.isClosed && s.isConnected) {
-                        val packetType = inputStream.readByte()
-                        val length = inputStream.readInt()
-                        if (length <= 0 || length > 10_000_000) {
-                            throw IllegalStateException("Invalid packet length: $length (Type: $packetType)")
-                        }
-
-                        val payload = ByteArray(length)
-                        inputStream.readFully(payload)
-
-                        when (packetType) {
-                            RelayServer.PKT_TYPE_VIDEO -> {
-                                videoReceiveChannel.trySend(payload)
-                            }
-                            RelayServer.PKT_TYPE_AUDIO -> {
-                                if (!_isMuted.value) {
-                                    audioTrack?.write(payload, 0, payload.size)
-                                }
-                                if (!_isAudioPlaying.value) {
-                                    _isAudioPlaying.value = true
-                                }
-                            }
-                        }
+                // Check single socket connection mismatch (Requirement B: clear error on RX if only one socket connects)
+                if (isVideoSocketConnected && !isAudioSocketConnected) {
+                    if (now - connectionStartTimestamp >= 3000L) {
+                        statusDetailMessage = "ERROR: Video connected on port $videoPort, but Audio connection failed on port $audioPort"
                     }
-                } catch (e: Exception) {
-                    if (!isManuallyStopped.get()) {
-                        onLog("RX-Relay", "Connection dropped: ${e.message ?: "Disconnected"}", true)
+                } else if (!isVideoSocketConnected && isAudioSocketConnected) {
+                    if (now - connectionStartTimestamp >= 3000L) {
+                        statusDetailMessage = "ERROR: Audio connected on port $audioPort, but Video connection failed on port $videoPort"
                     }
-                } finally {
-                    _isAudioPlaying.value = false
-                    releaseAudioTrack()
-                    try { socket?.close() } catch (_: Exception) {}
+                } else if (isVideoSocketConnected && isAudioSocketConnected) {
+                    // Check for 3 seconds no video data (Requirement D)
+                    if (videoPacketsCount == 0L) {
+                        if (now - connectionStartTimestamp >= 3000L) {
+                            statusDetailMessage = "Connected but no data received for 3 seconds"
+                        }
+                    } else if (lastVideoPacketTimestamp > 0L && now - lastVideoPacketTimestamp >= 3000L) {
+                        statusDetailMessage = "Connected but no data received for 3 seconds"
+                    }
                 }
 
-                if (!isManuallyStopped.get()) {
-                    _connectionState.value = RxConnectionState.RECONNECTING
-                    onLog("RX-Relay", "Reconnecting in 2 seconds...", false)
-                    delay(2000)
-                } else {
+                updateStatsState()
+            }
+        }
+    }
+
+    private suspend fun runVideoLoop(host: String, port: Int, gen: Int) {
+        while (isRunning.get() && !isManuallyStopped.get() && gen == connectionGeneration.get()) {
+            var socket: Socket? = null
+            try {
+                statusDetailMessage = "Connecting to Video ($host:$port)..."
+                updateStatsState(force = true)
+
+                val s = Socket()
+                // Requirement B: Set TCP_NODELAY and 64 KB send and receive buffers
+                s.tcpNoDelay = true
+                s.sendBufferSize = 64 * 1024
+                s.receiveBufferSize = 64 * 1024
+                s.connect(InetSocketAddress(host, port), 4000)
+
+                if (gen != connectionGeneration.get() || !isRunning.get()) {
+                    try { s.close() } catch (_: Exception) {}
                     break
                 }
+
+                socket = s
+                videoSocket = s
+                isVideoSocketConnected = true
+                connectionStartTimestamp = SystemClock.elapsedRealtime()
+                _connectionState.value = RxConnectionState.CONNECTED
+                statusDetailMessage = "Connected (Video :$port, Audio :${port + 1})"
+                onLog("RX-Relay", "Video socket connected to $host:$port", false)
+                updateStatsState(force = true)
+
+                val inputStream = DataInputStream(BufferedInputStream(s.getInputStream(), 64 * 1024))
+
+                while (isRunning.get() && gen == connectionGeneration.get() && !s.isClosed && s.isConnected) {
+                    // Protocol: 4-byte big-endian length followed by raw JPEG bytes
+                    val length = inputStream.readInt()
+                    if (length <= 0 || length > 10_000_000) {
+                        throw IOException("Invalid video frame length received: $length")
+                    }
+
+                    val frameBytes = ByteArray(length)
+                    inputStream.readFully(frameBytes)
+
+                    videoPacketsCount++
+                    videoBytesCounter += length + 4
+                    lastVideoPacketTimestamp = SystemClock.elapsedRealtime()
+
+                    // Conflated handoff to decoder
+                    videoReceiveChannel.trySend(frameBytes)
+                }
+            } catch (e: SocketTimeoutException) {
+                // Requirement D: distinguish connect timed out
+                statusDetailMessage = "Connect timed out (wrong IP / different network / client isolation)"
+                onLog("RX-Relay", "Video connect timeout: ${e.message}", true)
+            } catch (e: ConnectException) {
+                // Requirement D: distinguish connection refused
+                statusDetailMessage = "Connection refused (TX not running or wrong port)"
+                onLog("RX-Relay", "Video connection refused: ${e.message}", true)
+            } catch (e: Exception) {
+                if (!isManuallyStopped.get() && gen == connectionGeneration.get()) {
+                    statusDetailMessage = "Video error: ${e.message ?: "Connection closed"}"
+                    onLog("RX-Relay", "Video connection exception: ${e.message}", false)
+                }
+            } finally {
+                isVideoSocketConnected = false
+                try { socket?.close() } catch (_: Exception) {}
+                if (gen == connectionGeneration.get()) {
+                    videoSocket = null
+                }
             }
-            _connectionState.value = RxConnectionState.DISCONNECTED
+
+            if (!isManuallyStopped.get() && gen == connectionGeneration.get()) {
+                _connectionState.value = RxConnectionState.RECONNECTING
+                updateStatsState(force = true)
+                delay(2000)
+            } else {
+                break
+            }
+        }
+    }
+
+    private suspend fun runAudioLoop(host: String, port: Int, gen: Int) {
+        while (isRunning.get() && !isManuallyStopped.get() && gen == connectionGeneration.get()) {
+            var socket: Socket? = null
+            try {
+                val s = Socket()
+                // Requirement B: Set TCP_NODELAY and 64 KB send and receive buffers
+                s.tcpNoDelay = true
+                s.sendBufferSize = 64 * 1024
+                s.receiveBufferSize = 64 * 1024
+                s.connect(InetSocketAddress(host, port), 4000)
+
+                if (gen != connectionGeneration.get() || !isRunning.get()) {
+                    try { s.close() } catch (_: Exception) {}
+                    break
+                }
+
+                socket = s
+                audioSocket = s
+                isAudioSocketConnected = true
+                onLog("RX-Relay", "Audio socket connected to $host:$port", false)
+
+                val inputStream = DataInputStream(BufferedInputStream(s.getInputStream(), 16 * 1024))
+
+                while (isRunning.get() && gen == connectionGeneration.get() && !s.isClosed && s.isConnected) {
+                    val length = inputStream.readInt()
+                    if (length <= 0 || length > 100_000) {
+                        throw IOException("Invalid audio chunk length received: $length")
+                    }
+
+                    val pcmBytes = ByteArray(length)
+                    inputStream.readFully(pcmBytes)
+
+                    audioPacketsCount++
+
+                    // Push to jitter buffer
+                    synchronized(audioJitterLock) {
+                        audioJitterQueue.addLast(pcmBytes)
+                        audioJitterBufferedBytes += pcmBytes.size
+
+                        // Requirement C: If more than about 120 ms queued, drop oldest audio to catch up
+                        while (audioJitterBufferedBytes > JITTER_TARGET_MAX_BYTES && audioJitterQueue.isNotEmpty()) {
+                            val dropped = audioJitterQueue.removeFirst()
+                            audioJitterBufferedBytes -= dropped.size
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                if (!isManuallyStopped.get() && gen == connectionGeneration.get()) {
+                    onLog("RX-Relay", "Audio socket note: ${e.message}", false)
+                }
+            } finally {
+                isAudioSocketConnected = false
+                try { socket?.close() } catch (_: Exception) {}
+                if (gen == connectionGeneration.get()) {
+                    audioSocket = null
+                }
+            }
+
+            if (!isManuallyStopped.get() && gen == connectionGeneration.get()) {
+                delay(2000)
+            } else {
+                break
+            }
+        }
+    }
+
+    /**
+     * Requirement C: RX audio
+     * - Audio runs on its own thread and must never block the video read loop.
+     * - Add a jitter buffer: start playback after about 60 ms is buffered.
+     *   If more than about 120 ms is queued, drop the oldest audio to catch up.
+     *   On underrun, write silence instead of stalling.
+     * - AudioTrack: USAGE_GAME, PERFORMANCE_MODE_LOW_LATENCY, buffer size = AudioTrack.getMinBufferSize (not doubled), 48 kHz stereo 16-bit.
+     */
+    private fun startAudioPlaybackThread(gen: Int) {
+        audioPlaybackJob?.cancel()
+        audioPlaybackJob = clientScope.launch(Dispatchers.Default) {
+            initAudioTrack()
+            val track = audioTrack ?: return@launch
+            val silenceChunk = ByteArray(SILENCE_CHUNK_BYTES)
+            var isBuffering = true
+
+            while (isActive && isRunning.get() && gen == connectionGeneration.get()) {
+                var chunkToPlay: ByteArray? = null
+
+                synchronized(audioJitterLock) {
+                    if (isBuffering) {
+                        // Start playback after about 60 ms is buffered (~11520 bytes)
+                        if (audioJitterBufferedBytes >= JITTER_TARGET_MIN_BYTES) {
+                            isBuffering = false
+                            chunkToPlay = audioJitterQueue.pollFirst()
+                            chunkToPlay?.let { audioJitterBufferedBytes -= it.size }
+                        }
+                    } else {
+                        chunkToPlay = audioJitterQueue.pollFirst()
+                        if (chunkToPlay != null) {
+                            audioJitterBufferedBytes -= chunkToPlay.size
+                        } else {
+                            // Underrun: require re-buffering
+                            isBuffering = true
+                        }
+                    }
+                }
+
+                if (chunkToPlay != null) {
+                    if (!_isMuted.value) {
+                        track.write(chunkToPlay, 0, chunkToPlay.size)
+                    }
+                    if (!_isAudioPlaying.value) {
+                        _isAudioPlaying.value = true
+                    }
+                } else {
+                    // On underrun, write silence instead of stalling
+                    if (!_isMuted.value) {
+                        track.write(silenceChunk, 0, silenceChunk.size)
+                    } else {
+                        delay(20)
+                    }
+                }
+            }
         }
     }
 
     private fun initAudioTrack() {
         try {
-            val minBufSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT) * 2
-            val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AUDIO_FORMAT)
+                .setSampleRate(SAMPLE_RATE)
+                .setChannelMask(CHANNEL_CONFIG_OUT)
+                .build()
+
+            val track = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AUDIO_FORMAT)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(CHANNEL_CONFIG)
-                            .build()
-                    )
-                    .setBufferSizeInBytes(minBufSize)
+                    .setAudioAttributes(attributes)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(minBuf) // NOT doubled!
+                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                AudioTrack.Builder()
+                    .setAudioAttributes(attributes)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(minBuf)
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
             } else {
@@ -195,58 +451,80 @@ class RelayClient(
                 AudioTrack(
                     AudioManager.STREAM_MUSIC,
                     SAMPLE_RATE,
-                    CHANNEL_CONFIG,
+                    CHANNEL_CONFIG_OUT,
                     AUDIO_FORMAT,
-                    minBufSize,
+                    minBuf,
                     AudioTrack.MODE_STREAM
                 )
             }
             track.play()
             audioTrack = track
         } catch (e: Exception) {
-            onLog("RX-Relay", "AudioTrack init note: ${e.message}", false)
+            onLog("RX-Relay", "AudioTrack init exception: ${e.message}", false)
         }
     }
 
-    private fun releaseAudioTrack() {
-        try {
-            audioTrack?.stop()
-            audioTrack?.release()
-        } catch (_: Exception) {}
-        audioTrack = null
-    }
-
-    private fun startDecoderThread() {
+    private fun startDecoderThread(gen: Int) {
         decoderJob?.cancel()
         decoderJob = clientScope.launch(Dispatchers.Default) {
             var frameCount = 0
             var lastMeasureTime = SystemClock.elapsedRealtime()
-            var totalCount = 0L
+            var currentFrameSize = 0
 
-            while (isActive && isRunning.get()) {
+            while (isActive && isRunning.get() && gen == connectionGeneration.get()) {
                 val frame = videoReceiveChannel.receive()
 
                 if (frame.isNotEmpty()) {
-                    val cleanFrame = JpegUtils.extractCleanJpeg(frame)
+                    currentFrameSize = frame.size
+
+                    // Diagnostics: first 4 bytes hex
+                    lastHex4 = frame.take(4).joinToString(" ") { "%02X".format(it) }
+
+                    // Diagnostics: ends with FF D9
+                    lastEndsEoi = frame.size >= 2 &&
+                        (frame[frame.size - 2].toInt() and 0xFF) == 0xFF &&
+                        (frame[frame.size - 1].toInt() and 0xFF) == 0xD9
+
                     val decodeStart = SystemClock.elapsedRealtime()
 
-                    var decoded = try {
-                        BitmapFactory.decodeByteArray(cleanFrame, 0, cleanFrame.size, bitmapOptions)
-                    } catch (_: Exception) {
+                    // Try direct decoding first
+                    var decodeErrMsg: String? = null
+                    var decoded: Bitmap? = try {
+                        BitmapFactory.decodeByteArray(frame, 0, frame.size, bitmapOptions)
+                    } catch (e: Exception) {
+                        decodeErrMsg = e.message
                         null
                     }
+
                     if (decoded == null) {
                         decoded = try {
-                            BitmapFactory.decodeByteArray(cleanFrame, 0, cleanFrame.size)
-                        } catch (_: Exception) {
+                            BitmapFactory.decodeByteArray(frame, 0, frame.size)
+                        } catch (e: Exception) {
+                            decodeErrMsg = e.message
                             null
                         }
                     }
+
+                    // Fallback: extract clean JPEG if needed
+                    if (decoded == null) {
+                        val clean = JpegUtils.extractCleanJpeg(frame)
+                        if (clean !== frame && clean.size != frame.size) {
+                            decoded = try {
+                                BitmapFactory.decodeByteArray(clean, 0, clean.size)
+                            } catch (e: Exception) {
+                                decodeErrMsg = e.message
+                                null
+                            }
+                        }
+                    }
+
+                    // Fallback: ARGB_8888
                     if (decoded == null) {
                         val fallbackOpts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
                         decoded = try {
-                            BitmapFactory.decodeByteArray(cleanFrame, 0, cleanFrame.size, fallbackOpts)
-                        } catch (_: Exception) {
+                            BitmapFactory.decodeByteArray(frame, 0, frame.size, fallbackOpts)
+                        } catch (e: Exception) {
+                            decodeErrMsg = e.message
                             null
                         }
                     }
@@ -254,29 +532,34 @@ class RelayClient(
                     val decodeTime = SystemClock.elapsedRealtime() - decodeStart
 
                     if (decoded != null) {
+                        decodeSuccessCount++
+                        lastBmpSize = "${decoded.width}x${decoded.height}"
                         _currentBitmap.value = decoded
                         frameCount++
-                        totalCount++
 
                         val now = SystemClock.elapsedRealtime()
                         if (now - lastMeasureTime >= 1000L) {
                             val elapsedSec = (now - lastMeasureTime) / 1000f
-                            val currentFps = frameCount / elapsedSec
+                            val currentFps = (frameCount / elapsedSec * 10).roundToInt() / 10f
                             lastMeasureTime = now
                             frameCount = 0
 
-                            _stats.value = RxStats(
-                                fps = (currentFps * 10).roundToInt() / 10f,
-                                decodeTimeMs = decodeTime,
-                                frameSizeBytes = cleanFrame.size,
-                                totalFrames = totalCount
+                            updateStatsState(
+                                fps = currentFps,
+                                decodeTime = decodeTime,
+                                frameSize = currentFrameSize
                             )
-                        } else {
-                            _stats.value = _stats.value.copy(
-                                decodeTimeMs = decodeTime,
-                                frameSizeBytes = cleanFrame.size,
-                                totalFrames = totalCount
-                            )
+                        }
+                    } else {
+                        decodeFailureCount++
+                        lastDecodeErrorMsg = decodeErrMsg ?: "BitmapFactory returned null"
+
+                        // Requirement E: Log a decode failure with frame size and the first 8 bytes, at most once per second
+                        val now = SystemClock.elapsedRealtime()
+                        if (now - lastDecodeFailLogTimestamp >= 1000L) {
+                            lastDecodeFailLogTimestamp = now
+                            val head8 = frame.take(8).joinToString(" ") { "%02X".format(it) }
+                            onLog("RX-Relay", "Decode failure (Size: ${frame.size}B, Head: $head8, Error: $lastDecodeErrorMsg)", true)
                         }
                     }
                 }
@@ -284,21 +567,112 @@ class RelayClient(
         }
     }
 
-    fun disconnect() {
-        isManuallyStopped.set(true)
-        isRunning.set(false)
-        _connectionState.value = RxConnectionState.DISCONNECTED
-        _isAudioPlaying.value = false
+    private fun updateStatsState(
+        force: Boolean = false,
+        fps: Float? = null,
+        decodeTime: Long? = null,
+        frameSize: Int? = null
+    ) {
+        val now = SystemClock.elapsedRealtime()
+        if (force || now - lastStatsUpdateTimestamp >= 1000L) {
+            val elapsedSec = if (lastStatsUpdateTimestamp > 0) (now - lastStatsUpdateTimestamp) / 1000f else 1f
+            val bytesPerSec = if (elapsedSec > 0) (videoBytesCounter / elapsedSec).toLong() else 0L
+            videoBytesCounter = 0L
+            lastStatsUpdateTimestamp = now
 
-        connectionJob?.cancel()
-        connectionJob = null
+            val secSinceLastVideo = if (lastVideoPacketTimestamp > 0) {
+                ((now - lastVideoPacketTimestamp) / 1000f * 10).roundToInt() / 10f
+            } else {
+                -1f
+            }
+
+            val currentFps = fps ?: _stats.value.fps
+            val currentDecodeTime = decodeTime ?: _stats.value.decodeTimeMs
+            val currentFrameSize = frameSize ?: _stats.value.frameSizeBytes
+
+            _stats.value = RxStats(
+                videoPacketsReceived = videoPacketsCount,
+                videoBytesPerSecond = bytesPerSec,
+                audioPacketsReceived = audioPacketsCount,
+                secondsSinceLastVideoPacket = secSinceLastVideo,
+                decodeSuccesses = decodeSuccessCount,
+                decodeFailures = decodeFailureCount,
+                lastDecodeError = lastDecodeErrorMsg,
+                lastFrameFirst4BytesHex = lastHex4,
+                lastFrameEndsEoi = lastEndsEoi,
+                decodedBitmapSize = lastBmpSize,
+                fps = currentFps,
+                decodeTimeMs = currentDecodeTime,
+                frameSizeBytes = currentFrameSize,
+                statusDetail = statusDetailMessage
+            )
+        }
+    }
+
+    private fun resetDiagnostics() {
+        videoPacketsCount = 0L
+        audioPacketsCount = 0L
+        decodeSuccessCount = 0L
+        decodeFailureCount = 0L
+        lastDecodeErrorMsg = "None"
+        lastHex4 = "--"
+        lastEndsEoi = false
+        lastBmpSize = "--"
+        lastVideoPacketTimestamp = 0L
+        videoBytesCounter = 0L
+        lastStatsUpdateTimestamp = SystemClock.elapsedRealtime()
+        connectionStartTimestamp = SystemClock.elapsedRealtime()
+        synchronized(audioJitterLock) {
+            audioJitterQueue.clear()
+            audioJitterBufferedBytes = 0
+        }
+    }
+
+    private fun internalStopPrevious() {
+        // Requirement D: Keep video and audio socket references as fields. disconnect() must close both sockets to unblock the reads.
+        try { videoSocket?.close() } catch (_: Exception) {}
+        videoSocket = null
+        isVideoSocketConnected = false
+
+        try { audioSocket?.close() } catch (_: Exception) {}
+        audioSocket = null
+        isAudioSocketConnected = false
+
+        videoJob?.cancel()
+        videoJob = null
+
+        audioJob?.cancel()
+        audioJob = null
 
         decoderJob?.cancel()
         decoderJob = null
 
-        releaseAudioTrack()
+        audioPlaybackJob?.cancel()
+        audioPlaybackJob = null
 
+        watchdogJob?.cancel()
+        watchdogJob = null
+
+        try {
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (_: Exception) {}
+        audioTrack = null
+
+        _isAudioPlaying.value = false
+    }
+
+    fun disconnect() {
+        isManuallyStopped.set(true)
+        isRunning.set(false)
+        connectionGeneration.incrementAndGet()
+
+        internalStopPrevious()
+
+        _connectionState.value = RxConnectionState.DISCONNECTED
         _currentBitmap.value = null
+        statusDetailMessage = "Disconnected"
+        updateStatsState(force = true)
         onLog("RX-Relay", "Disconnected from server", false)
     }
 }

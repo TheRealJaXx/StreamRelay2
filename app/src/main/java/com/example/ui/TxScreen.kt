@@ -76,6 +76,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.model.CaptureTelemetry
 import com.example.model.LogEntry
 import com.example.model.UsbDeviceInfo
+import com.example.relay.TxRelayStats
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -88,6 +89,7 @@ fun TxScreen(
     val txPort by viewModel.txPort.collectAsStateWithLifecycle()
     val connectedClients by viewModel.txConnectedClients.collectAsStateWithLifecycle()
     val isServerActive by viewModel.isTxServerActive.collectAsStateWithLifecycle()
+    val txStats by viewModel.txStats.collectAsStateWithLifecycle()
     val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
     val usbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
@@ -175,6 +177,11 @@ fun TxScreen(
                         viewModel.requestUsbPermission(vid, pid)
                     }
                 )
+            }
+
+            // Requirement E: TX On-Screen Diagnostics Card
+            item {
+                TxRelayDiagnosticsCard(txStats = txStats)
             }
 
             // Live Video Preview Card with Enable / Disable Toggle
@@ -773,3 +780,93 @@ private fun TxPreviewCard(
         }
     }
 }
+
+@Composable
+private fun TxRelayDiagnosticsCard(
+    txStats: TxRelayStats
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Relay Network Diagnostics",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Surface(
+                    color = if (txStats.isClientConnected) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFF64748B).copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = if (txStats.isClientConnected) "Client Connected: YES" else "Client Connected: NO",
+                        color = if (txStats.isClientConnected) Color(0xFF10B981) else Color(0xFF94A3B8),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            // Monospace diagnostics lines (Requirement E)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = Color(0xFF0F172A),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = "Frames Captured: ${txStats.framesCaptured}  |  Submitted: ${txStats.framesSubmitted}",
+                        color = Color(0xFF38BDF8),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Frames Sent: ${txStats.framesSent}  |  Dropped: ${txStats.framesDropped}",
+                        color = if (txStats.framesDropped > 0) Color(0xFFFDE68A) else Color(0xFFA7F3D0),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Last Frame: ${txStats.lastFrameSizeBytes} B (${txStats.lastFrameSizeBytes / 1024} KB)",
+                        color = Color(0xFFE2E8F0),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Starts FF D8: ${if (txStats.lastFrameStartsSoi) "YES" else "NO"}  |  Ends FF D9: ${if (txStats.lastFrameEndsEoi) "YES" else "NO"}",
+                        color = if (txStats.lastFrameStartsSoi && txStats.lastFrameEndsEoi) Color(0xFF34D399) else Color(0xFFF87171),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Audio Chunks Captured: ${txStats.audioChunksCaptured}  |  Sent: ${txStats.audioChunksSent}",
+                        color = Color(0xFFCBD5E1),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+    }
+}
+

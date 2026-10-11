@@ -15,9 +15,12 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -35,9 +38,13 @@ class AudioCaptureEngine(
     private val audioScope = CoroutineScope(Dispatchers.IO)
     private val isRunning = AtomicBoolean(false)
     private var captureJob: Job? = null
+    private var localPlaybackJob: Job? = null
 
     private var audioRecord: AudioRecord? = null
     private var localAudioTrack: AudioTrack? = null
+
+    // Non-blocking channel for local playback loop: drops oldest audio if playback falls behind
+    private val localPlaybackChannel = Channel<ByteArray>(capacity = 3, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     private val _isCapturing = MutableStateFlow(false)
     val isCapturing: StateFlow<Boolean> = _isCapturing.asStateFlow()
@@ -135,6 +142,27 @@ class AudioCaptureEngine(
 
     private fun startCaptureLoop() {
         captureJob?.cancel()
+        localPlaybackJob?.cancel()
+
+        // 1. Separate coroutine worker for local playback write (never blocks capture thread)
+        val track = initLocalAudioTrack(SAMPLE_RATE)
+        localAudioTrack = track
+        if (_isLocalPlaybackEnabled.value) {
+            try { track?.play() } catch (_: Exception) {}
+        }
+
+        localPlaybackJob = audioScope.launch {
+            while (isActive && isRunning.get()) {
+                val chunk = localPlaybackChannel.receive()
+                if (_isLocalPlaybackEnabled.value && localAudioTrack != null) {
+                    try {
+                        localAudioTrack?.write(chunk, 0, chunk.size)
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
+        // 2. High-priority capture loop reading from USB Audio
         captureJob = audioScope.launch {
             val usbDevice = findUsbAudioDevice()
             val deviceName = usbDevice?.productName?.toString() ?: "USB Capture Audio"
@@ -154,16 +182,10 @@ class AudioCaptureEngine(
 
             audioRecord = record
 
-            val track = initLocalAudioTrack(SAMPLE_RATE)
-            localAudioTrack = track
-            if (_isLocalPlaybackEnabled.value) {
-                try { track?.play() } catch (_: Exception) {}
-            }
-
             try {
                 record.startRecording()
                 _isCapturing.value = true
-                onLog("TX-Audio", "Audio live from $deviceName (48kHz Stereo)", false)
+                onLog("TX-Audio", "Audio capturing from $deviceName (48kHz Stereo)", false)
 
                 // 20ms chunks (48000 samples/sec * 4 bytes/sample / 50 = 3840 bytes)
                 val chunkSize = (SAMPLE_RATE * 4) / 50
@@ -172,14 +194,15 @@ class AudioCaptureEngine(
                 while (isRunning.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     val readBytes = record.read(pcmBuffer, 0, pcmBuffer.size)
                     if (readBytes > 0) {
-                        // 1. Play on phone speakers/earpiece if enabled
+                        val chunkCopy = pcmBuffer.copyOf(readBytes)
+
+                        // Requirement C: On TX, the audio capture loop must never block on local playback write
                         if (_isLocalPlaybackEnabled.value) {
-                            localAudioTrack?.write(pcmBuffer, 0, readBytes)
+                            localPlaybackChannel.trySend(chunkCopy)
                         }
 
-                        // 2. Transmit to network receiver
-                        val copy = pcmBuffer.copyOf(readBytes)
-                        onAudioChunkCaptured?.invoke(copy)
+                        // Forward to network relay
+                        onAudioChunkCaptured?.invoke(chunkCopy)
                     }
                 }
             } catch (e: Exception) {
@@ -191,12 +214,6 @@ class AudioCaptureEngine(
                     record.release()
                 } catch (_: Exception) {}
                 audioRecord = null
-
-                try {
-                    track?.stop()
-                    track?.release()
-                } catch (_: Exception) {}
-                localAudioTrack = null
             }
         }
     }
@@ -248,22 +265,30 @@ class AudioCaptureEngine(
 
     private fun initLocalAudioTrack(sampleRate: Int): AudioTrack? {
         return try {
-            val minBufSize = AudioTrack.getMinBufferSize(sampleRate, CHANNEL_CONFIG_OUT, AUDIO_FORMAT) * 2
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // Requirement C: AudioTrack: USAGE_GAME, PERFORMANCE_MODE_LOW_LATENCY, buffer size = AudioTrack.getMinBufferSize (not doubled)
+            val minBufSize = AudioTrack.getMinBufferSize(sampleRate, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                .build()
+            val format = AudioFormat.Builder()
+                .setEncoding(AUDIO_FORMAT)
+                .setSampleRate(sampleRate)
+                .setChannelMask(CHANNEL_CONFIG_OUT)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 AudioTrack.Builder()
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                            .build()
-                    )
-                    .setAudioFormat(
-                        AudioFormat.Builder()
-                            .setEncoding(AUDIO_FORMAT)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(CHANNEL_CONFIG_OUT)
-                            .build()
-                    )
+                    .setAudioAttributes(attributes)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(minBufSize)
+                    .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                AudioTrack.Builder()
+                    .setAudioAttributes(attributes)
+                    .setAudioFormat(format)
                     .setBufferSizeInBytes(minBufSize)
                     .setTransferMode(AudioTrack.MODE_STREAM)
                     .build()
@@ -289,6 +314,9 @@ class AudioCaptureEngine(
 
         captureJob?.cancel()
         captureJob = null
+
+        localPlaybackJob?.cancel()
+        localPlaybackJob = null
 
         try {
             audioRecord?.stop()
