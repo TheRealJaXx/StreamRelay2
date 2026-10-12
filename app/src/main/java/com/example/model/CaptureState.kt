@@ -38,7 +38,6 @@ data class CaptureTelemetry(
     val lastFrameTimeMs: Long = 0L,
     val lastFrameSizeBytes: Int = 0,
     val streamDurationSeconds: Long = 0L,
-    val targetFps: Int = 60,
     val errorMessage: String? = null
 )
 

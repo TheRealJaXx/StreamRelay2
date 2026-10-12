@@ -1,29 +1,17 @@
 package com.example.ui
 
-import android.app.Activity
-import android.content.pm.ActivityInfo
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.WindowManager
-import androidx.activity.compose.BackHandler
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,11 +28,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Router
-import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.Videocam
@@ -52,19 +37,15 @@ import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -77,7 +58,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -86,7 +66,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -114,8 +93,9 @@ fun TxScreen(
     val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
     val usbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val isLocalPreviewEnabled by viewModel.isLocalPreviewEnabled.collectAsStateWithLifecycle()
     val isAudioStreaming by viewModel.isAudioStreaming.collectAsStateWithLifecycle()
-    val targetFps by viewModel.targetFps.collectAsStateWithLifecycle()
+    val isLocalAudioEnabled by viewModel.isLocalAudioEnabled.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -133,7 +113,7 @@ fun TxScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Transmitter · Port $txPort · $targetFps FPS",
+                            text = "Transmitter · Port $txPort",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -187,15 +167,6 @@ fun TxScreen(
                 )
             }
 
-            // Target Stream FPS Selection Card (25, 30, 50, 60 FPS)
-            item {
-                TxFpsSelectionCard(
-                    currentFps = targetFps,
-                    supportedFpsList = viewModel.supportedFpsList,
-                    onSelectFps = { fps -> viewModel.setTargetFps(fps) }
-                )
-            }
-
             // Capture Card Telemetry
             item {
                 TxTelemetryCard(
@@ -208,11 +179,20 @@ fun TxScreen(
                 )
             }
 
-            // TX On-Screen Diagnostics Card
+            // Requirement E: TX On-Screen Diagnostics Card
             item {
-                TxRelayDiagnosticsCard(
-                    txStats = txStats,
-                    targetFps = targetFps
+                TxRelayDiagnosticsCard(txStats = txStats)
+            }
+
+            // Live Video Preview Card with Enable / Disable Toggle
+            item {
+                TxPreviewCard(
+                    isPreviewEnabled = isLocalPreviewEnabled,
+                    isAudioEnabled = isLocalAudioEnabled,
+                    onTogglePreview = { enabled -> viewModel.setLocalPreviewEnabled(enabled) },
+                    onToggleAudio = { enabled -> viewModel.setLocalAudioEnabled(enabled) },
+                    onSurfaceReady = { holder -> viewModel.setLocalPreviewHolder(holder) },
+                    onSurfaceDestroyed = { viewModel.setLocalPreviewHolder(null) }
                 )
             }
 
@@ -652,117 +632,158 @@ private fun DiagnosticLogsSection(
 }
 
 @Composable
-private fun TxFpsSelectionCard(
-    currentFps: Int,
-    supportedFpsList: List<Int>,
-    onSelectFps: (Int) -> Unit
+private fun TxPreviewCard(
+    isPreviewEnabled: Boolean,
+    isAudioEnabled: Boolean,
+    onTogglePreview: (Boolean) -> Unit,
+    onToggleAudio: (Boolean) -> Unit,
+    onSurfaceReady: (SurfaceHolder) -> Unit,
+    onSurfaceDestroyed: () -> Unit
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth().testTag("tx_fps_selection_card"),
+        modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(16.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.Speed,
+                        imageVector = Icons.Default.Videocam,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(22.dp)
+                        tint = MaterialTheme.colorScheme.primary
                     )
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Target Frame Rate (FPS)",
+                        text = "Local Video Preview",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                 }
-                Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = RoundedCornerShape(8.dp)
+
+                FilledTonalButton(
+                    onClick = { onTogglePreview(!isPreviewEnabled) }
                 ) {
-                    Text(
-                        text = "$currentFps FPS Active",
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    Icon(
+                        imageVector = if (isPreviewEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(if (isPreviewEnabled) "Hide Preview" else "Show Preview")
                 }
             }
 
-            Text(
-                text = "Paces network packet dispatch to match transmission capacity and prevent receiver buffer jitter.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            Spacer(modifier = Modifier.height(12.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                supportedFpsList.forEach { fps ->
-                    val isSelected = fps == currentFps
-                    FilterChip(
-                        selected = isSelected,
-                        onClick = { onSelectFps(fps) },
-                        label = {
-                            Text(
-                                text = "$fps FPS",
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                fontFamily = FontFamily.Monospace
-                            )
-                        },
-                        leadingIcon = if (isSelected) {
-                            {
-                                Icon(
-                                    imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
-                                )
+            if (isPreviewEnabled) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.Black)
+                        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { ctx ->
+                            SurfaceView(ctx).apply {
+                                holder.addCallback(object : SurfaceHolder.Callback {
+                                    override fun surfaceCreated(holder: SurfaceHolder) {
+                                        onSurfaceReady(holder)
+                                    }
+
+                                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                        onSurfaceReady(holder)
+                                    }
+
+                                    override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                        onSurfaceDestroyed()
+                                    }
+                                })
                             }
-                        } else null,
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("fps_chip_$fps")
+                        }
                     )
                 }
-            }
 
-            Text(
-                text = when (currentFps) {
-                    60 -> "60 FPS · Full console motion smoothness (recommended for 5GHz Wi-Fi)"
-                    50 -> "50 FPS · PAL standard rate · Smooth motion with 17% less bandwidth"
-                    30 -> "30 FPS · Half-rate pacing · Highly stable on congested 2.4GHz Wi-Fi"
-                    25 -> "25 FPS · Low bandwidth · Maximum resistance to Wi-Fi jitter & packet loss"
-                    else -> "$currentFps FPS active"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
-                fontFamily = FontFamily.Monospace
-            )
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (isAudioEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                                contentDescription = null,
+                                tint = if (isAudioEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (isAudioEnabled) "Phone Speaker: ON" else "Phone Speaker: MUTED",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        FilledTonalButton(
+                            onClick = { onToggleAudio(!isAudioEnabled) }
+                        ) {
+                            Text(if (isAudioEnabled) "Mute Speaker" else "Hear Sound")
+                        }
+                    }
+                }
+            } else {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.VideocamOff,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "Local preview is hidden. Capture card continues relaying over network.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
 private fun TxRelayDiagnosticsCard(
-    txStats: TxRelayStats,
-    targetFps: Int = 60
+    txStats: TxRelayStats
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -819,7 +840,7 @@ private fun TxRelayDiagnosticsCard(
                         fontFamily = FontFamily.Monospace
                     )
                     Text(
-                        text = "Frames Sent: ${txStats.framesSent}  |  Dropped: ${txStats.framesDropped}  |  Target: ${targetFps} FPS",
+                        text = "Frames Sent: ${txStats.framesSent}  |  Dropped: ${txStats.framesDropped}",
                         color = if (txStats.framesDropped > 0) Color(0xFFFDE68A) else Color(0xFFA7F3D0),
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace

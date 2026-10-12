@@ -22,7 +22,6 @@ import com.example.ui.CaptureViewModel
 import com.example.ui.ModeSelectionScreen
 import com.example.ui.RxScreen
 import com.example.ui.TxScreen
-import com.example.ui.ViewerScreen
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
@@ -46,7 +45,7 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(currentMode) {
-          if (currentMode == AppMode.TX || currentMode == AppMode.VIEWER) {
+          if (currentMode == AppMode.TX) {
             val cameraGranted = ContextCompat.checkSelfPermission(
               this@MainActivity,
               Manifest.permission.CAMERA
@@ -67,7 +66,7 @@ class MainActivity : ComponentActivity() {
           }
         }
 
-        // Back button returns to role selection if inside any active mode
+        // Back button returns to role selection if inside TX or RX
         BackHandler(enabled = currentMode != AppMode.UNSELECTED) {
           viewModel.selectMode(AppMode.UNSELECTED)
         }
@@ -87,12 +86,6 @@ class MainActivity : ComponentActivity() {
             }
             AppMode.RX -> {
               RxScreen(
-                viewModel = viewModel,
-                onChangeMode = { viewModel.selectMode(AppMode.UNSELECTED) }
-              )
-            }
-            AppMode.VIEWER -> {
-              ViewerScreen(
                 viewModel = viewModel,
                 onChangeMode = { viewModel.selectMode(AppMode.UNSELECTED) }
               )

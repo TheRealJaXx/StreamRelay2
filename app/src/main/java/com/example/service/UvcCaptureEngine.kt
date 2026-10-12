@@ -36,7 +36,6 @@ class UvcCaptureEngine(
         description = "Recommended for PS3 · 60fps · Low Latency"
     )
 
-    private var targetFps: Int = 60
     private var currentSurface: Any? = null
     private var activeDevice: UsbDevice? = null
 
@@ -64,15 +63,6 @@ class UvcCaptureEngine(
                (size.type != 4 && size.type != 5 && size.type != 0)
     }
 
-    fun setTargetFps(fps: Int) {
-        targetFps = fps
-        _telemetry.value = _telemetry.value.copy(targetFps = fps)
-        onLog("UVC", "Target FPS updated to $fps", false)
-        if (cameraHelper.isCameraOpened) {
-            applyMjpegResolution(selectedPreset.width, selectedPreset.height)
-        }
-    }
-
     fun setStreamPreset(preset: StreamPreset) {
         selectedPreset = preset
         onLog("UVC", "Selected resolution: ${preset.width}x${preset.height} (Strictly MJPEG)", false)
@@ -86,13 +76,11 @@ class UvcCaptureEngine(
         val supported = cameraHelper.supportedSizeList ?: emptyList()
         val mjpegSizes = supported.filter { isMjpeg(it) }
 
-        // Prefer hardware size matching targetFps if explicitly advertised
-        return mjpegSizes.firstOrNull { it.width == targetW && it.height == targetH && (it.fps == targetFps || it.fpsList?.contains(targetFps) == true) }
-            ?: mjpegSizes.firstOrNull { it.width == targetW && it.height == targetH }
+        return mjpegSizes.firstOrNull { it.width == targetW && it.height == targetH }
             ?: mjpegSizes.firstOrNull { it.width == targetW }
             ?: mjpegSizes.firstOrNull()
             ?: supported.firstOrNull { it.width == targetW && it.height == targetH }
-            ?: Size(7, targetW, targetH, targetFps, null)
+            ?: Size(7, targetW, targetH, 60, null)
     }
 
     private fun applyMjpegResolution(targetW: Int, targetH: Int) {

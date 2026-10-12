@@ -32,9 +32,8 @@ import java.util.Locale
 
 enum class AppMode {
     UNSELECTED,
-    TX,     // Transmitter (Pure network relay)
-    RX,     // Receiver (Client display)
-    VIEWER  // Viewer (Direct local HDMI video & audio display)
+    TX, // Transmitter
+    RX  // Receiver
 }
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
@@ -62,11 +61,6 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     private val _rxTargetPort = MutableStateFlow(prefs.getInt("pref_rx_port", 4120))
     val rxTargetPort: StateFlow<Int> = _rxTargetPort.asStateFlow()
-
-    // FPS selection options: 25, 30, 50, 60 FPS to prevent network jitter
-    val supportedFpsList: List<Int> = listOf(25, 30, 50, 60)
-    private val _targetFps = MutableStateFlow(prefs.getInt("pref_target_fps", 60))
-    val targetFps: StateFlow<Int> = _targetFps.asStateFlow()
 
     // Hardware capture services (TX)
     val availablePresets: List<StreamPreset> = listOf(
@@ -123,49 +117,27 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     private var currentLocalHolder: SurfaceHolder? = null
     private var offscreenDrainer: OffscreenDrainer? = null
 
-    // Precise accumulator clock for uniform frame dispatch pacing (eliminates network buffer jitter)
-    private var nextFrameAllowedTimeNs = 0L
-
-    private fun shouldDispatchFrame(fps: Int): Boolean {
-        if (fps >= 60) return true
-        val now = System.nanoTime()
-        val intervalNs = 1_000_000_000L / fps
-        if (now >= nextFrameAllowedTimeNs) {
-            if (now - nextFrameAllowedTimeNs > intervalNs * 2L) {
-                nextFrameAllowedTimeNs = now + intervalNs
-            } else {
-                nextFrameAllowedTimeNs += intervalNs
-            }
-            return true
-        }
-        return false
-    }
-
     init {
         addLog("System", "Stream Relay initialized (Separate Video & Audio Sockets)", false)
-        uvcCaptureEngine.setTargetFps(_targetFps.value)
 
         // Wire camera frames directly from UVC engine into TCP server
         uvcCaptureEngine.onRawFrameCaptured = { rawBytes ->
             relayServer.recordFrameCaptured()
 
-            val fps = _targetFps.value
-            if (shouldDispatchFrame(fps)) {
-                val frameToSend = if (JpegUtils.isJpeg(rawBytes)) {
-                    val endsEoi = rawBytes.size >= 2 &&
-                        (rawBytes[rawBytes.size - 2].toInt() and 0xFF) == 0xFF &&
-                        (rawBytes[rawBytes.size - 1].toInt() and 0xFF) == 0xD9
-                    if (endsEoi) rawBytes else JpegUtils.extractCleanJpeg(rawBytes)
-                } else {
-                    // Buffer is uncompressed YUY2/NV21 from UVC camera (e.g. 1.84MB for 720p).
-                    // Compress to compact JPEG (approx 70-100KB) for low latency and smooth streaming.
-                    val telem = telemetry.value
-                    val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
-                    val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
-                    JpegUtils.compressYuvToJpeg(rawBytes, w, h, quality = 92) ?: rawBytes
-                }
-                relayServer.submitFrame(frameToSend)
+            val frameToSend = if (JpegUtils.isJpeg(rawBytes)) {
+                val endsEoi = rawBytes.size >= 2 &&
+                    (rawBytes[rawBytes.size - 2].toInt() and 0xFF) == 0xFF &&
+                    (rawBytes[rawBytes.size - 1].toInt() and 0xFF) == 0xD9
+                if (endsEoi) rawBytes else JpegUtils.extractCleanJpeg(rawBytes)
+            } else {
+                // Buffer is uncompressed YUY2/NV21 from UVC camera (e.g. 1.84MB for 720p).
+                // Compress to compact JPEG (approx 70-100KB) for low latency and smooth 60fps streaming.
+                val telem = telemetry.value
+                val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
+                val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
+                JpegUtils.compressYuvToJpeg(rawBytes, w, h, quality = 80) ?: rawBytes
             }
+            relayServer.submitFrame(frameToSend)
         }
 
         // Wire raw PCM audio chunks directly from Audio engine into Audio TCP server
@@ -173,10 +145,10 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             relayServer.submitAudio(pcmBytes)
         }
 
-        // Auto-start capture when device connects/permission granted in TX or VIEWER mode
+        // Auto-start capture when device connects/permission granted in TX mode
         viewModelScope.launch {
             usbMonitor.connectedDevices.collect { devices ->
-                if ((_currentMode.value == AppMode.TX || _currentMode.value == AppMode.VIEWER) && !telemetry.value.isStreaming) {
+                if (_currentMode.value == AppMode.TX && !telemetry.value.isStreaming) {
                     val readyDevice = devices.firstOrNull { it.hasPermission && it.isUvcVideo }
                         ?: devices.firstOrNull { it.hasPermission }
                     if (readyDevice != null) {
@@ -201,12 +173,6 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             offscreenDrainer?.release()
         } catch (_: Exception) {}
         offscreenDrainer = null
-    }
-
-    fun setViewerSurface(holder: SurfaceHolder?) {
-        if (_currentMode.value == AppMode.VIEWER) {
-            uvcCaptureEngine.setPreviewSurface(holder)
-        }
     }
 
     fun setLocalPreviewEnabled(enabled: Boolean) {
@@ -243,7 +209,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onAudioPermissionGranted() {
-        if (_currentMode.value == AppMode.TX || _currentMode.value == AppMode.VIEWER) {
+        if (_currentMode.value == AppMode.TX) {
             audioCaptureEngine.start()
         }
     }
@@ -256,9 +222,12 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 relayClient.disconnect()
                 refreshLocalIp()
                 usbMonitor.start()
-                // TX uses headless offscreen surface ONLY - zero preview rendering overhead
-                val offscreen = ensureOffscreenSurface()
-                uvcCaptureEngine.setPreviewSurface(offscreen)
+                val targetSurface = if (_isLocalPreviewEnabled.value && currentLocalHolder != null) {
+                    currentLocalHolder!!
+                } else {
+                    ensureOffscreenSurface()
+                }
+                uvcCaptureEngine.setPreviewSurface(targetSurface)
                 uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
                 startTxRelayServer(_txPort.value)
                 startCapture()
@@ -270,22 +239,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 uvcCaptureEngine.stopCapture()
                 uvcCaptureEngine.setPreviewSurface(null)
                 releaseOffscreenSurface()
-                audioCaptureEngine.stop()
                 usbMonitor.stop()
-            }
-            AppMode.VIEWER -> {
-                _isLocalPreviewEnabled.value = false
-                currentLocalHolder = null
-                stopTxRelayServer()
-                relayClient.disconnect()
-                releaseOffscreenSurface()
-                refreshLocalIp()
-                usbMonitor.start()
-                // Local HDMI audio plays through phone speaker
-                audioCaptureEngine.setLocalPlaybackEnabled(true)
-                audioCaptureEngine.start()
-                uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
-                startCapture()
             }
             AppMode.UNSELECTED -> {
                 _isLocalPreviewEnabled.value = false
@@ -295,7 +249,6 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 uvcCaptureEngine.stopCapture()
                 uvcCaptureEngine.setPreviewSurface(null)
                 releaseOffscreenSurface()
-                audioCaptureEngine.stop()
                 usbMonitor.stop()
             }
         }
@@ -346,13 +299,6 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     fun selectPreset(preset: StreamPreset) {
         _selectedPreset.value = preset
         uvcCaptureEngine.setStreamPreset(preset)
-    }
-
-    fun setTargetFps(fps: Int) {
-        _targetFps.value = fps
-        prefs.edit().putInt("pref_target_fps", fps).apply()
-        uvcCaptureEngine.setTargetFps(fps)
-        addLog("Stream", "Target frame rate set to $fps FPS", false)
     }
 
     fun startCapture() {
