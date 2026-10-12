@@ -52,6 +52,8 @@ import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
@@ -62,6 +64,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -112,6 +115,7 @@ fun TxScreen(
     val usbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
     val isAudioStreaming by viewModel.isAudioStreaming.collectAsStateWithLifecycle()
+    val targetFps by viewModel.targetFps.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -129,7 +133,7 @@ fun TxScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Transmitter · Port $txPort",
+                            text = "Transmitter · Port $txPort · $targetFps FPS",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -183,6 +187,15 @@ fun TxScreen(
                 )
             }
 
+            // Target Stream FPS Selection Card (25, 30, 50, 60 FPS)
+            item {
+                TxFpsSelectionCard(
+                    currentFps = targetFps,
+                    supportedFpsList = viewModel.supportedFpsList,
+                    onSelectFps = { fps -> viewModel.setTargetFps(fps) }
+                )
+            }
+
             // Capture Card Telemetry
             item {
                 TxTelemetryCard(
@@ -197,7 +210,10 @@ fun TxScreen(
 
             // TX On-Screen Diagnostics Card
             item {
-                TxRelayDiagnosticsCard(txStats = txStats)
+                TxRelayDiagnosticsCard(
+                    txStats = txStats,
+                    targetFps = targetFps
+                )
             }
 
             // Hardware Diagnostic Logs
@@ -636,8 +652,117 @@ private fun DiagnosticLogsSection(
 }
 
 @Composable
+private fun TxFpsSelectionCard(
+    currentFps: Int,
+    supportedFpsList: List<Int>,
+    onSelectFps: (Int) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth().testTag("tx_fps_selection_card"),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Speed,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Text(
+                        text = "Target Frame Rate (FPS)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "$currentFps FPS Active",
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            Text(
+                text = "Paces network packet dispatch to match transmission capacity and prevent receiver buffer jitter.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                supportedFpsList.forEach { fps ->
+                    val isSelected = fps == currentFps
+                    FilterChip(
+                        selected = isSelected,
+                        onClick = { onSelectFps(fps) },
+                        label = {
+                            Text(
+                                text = "$fps FPS",
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        },
+                        leadingIcon = if (isSelected) {
+                            {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        } else null,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("fps_chip_$fps")
+                    )
+                }
+            }
+
+            Text(
+                text = when (currentFps) {
+                    60 -> "60 FPS · Full console motion smoothness (recommended for 5GHz Wi-Fi)"
+                    50 -> "50 FPS · PAL standard rate · Smooth motion with 17% less bandwidth"
+                    30 -> "30 FPS · Half-rate pacing · Highly stable on congested 2.4GHz Wi-Fi"
+                    25 -> "25 FPS · Low bandwidth · Maximum resistance to Wi-Fi jitter & packet loss"
+                    else -> "$currentFps FPS active"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                fontFamily = FontFamily.Monospace
+            )
+        }
+    }
+}
+
+@Composable
 private fun TxRelayDiagnosticsCard(
-    txStats: TxRelayStats
+    txStats: TxRelayStats,
+    targetFps: Int = 60
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -694,7 +819,7 @@ private fun TxRelayDiagnosticsCard(
                         fontFamily = FontFamily.Monospace
                     )
                     Text(
-                        text = "Frames Sent: ${txStats.framesSent}  |  Dropped: ${txStats.framesDropped}",
+                        text = "Frames Sent: ${txStats.framesSent}  |  Dropped: ${txStats.framesDropped}  |  Target: ${targetFps} FPS",
                         color = if (txStats.framesDropped > 0) Color(0xFFFDE68A) else Color(0xFFA7F3D0),
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace
