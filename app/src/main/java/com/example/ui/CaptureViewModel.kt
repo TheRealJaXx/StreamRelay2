@@ -101,6 +101,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     val isAudioStreaming: StateFlow<Boolean> = audioCaptureEngine.isCapturing
     val isLocalAudioEnabled: StateFlow<Boolean> = audioCaptureEngine.isLocalPlaybackEnabled
+    val isUsbAudioConnected: StateFlow<Boolean> = audioCaptureEngine.isUsbAudioConnected
+    val activeAudioDeviceName: StateFlow<String> = audioCaptureEngine.activeDeviceName
     val isAudioPlaying: StateFlow<Boolean> = relayClient.isAudioPlaying
     val isRxMuted: StateFlow<Boolean> = relayClient.isMuted
 
@@ -270,6 +272,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 startCapture()
             }
             AppMode.TEST_TX -> {
+                audioCaptureEngine.stop()
                 _isLocalPreviewEnabled.value = false
                 currentLocalHolder = null
                 relayClient.disconnect()
@@ -284,6 +287,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             }
             AppMode.RX -> {
                 latencyTestEngine.stop()
+                audioCaptureEngine.stop()
                 _isLocalPreviewEnabled.value = false
                 currentLocalHolder = null
                 stopTxRelayServer()
@@ -294,6 +298,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             }
             AppMode.UNSELECTED -> {
                 latencyTestEngine.stop()
+                audioCaptureEngine.stop()
                 _isLocalPreviewEnabled.value = false
                 currentLocalHolder = null
                 stopTxRelayServer()
@@ -330,7 +335,11 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     fun startTxRelayServer(port: Int = _txPort.value) {
         refreshLocalIp()
         relayServer.start(port)
-        audioCaptureEngine.start()
+        if (_currentMode.value == AppMode.TX) {
+            audioCaptureEngine.start()
+        } else {
+            audioCaptureEngine.stop()
+        }
         RelayServerService.start(getApplication())
     }
 

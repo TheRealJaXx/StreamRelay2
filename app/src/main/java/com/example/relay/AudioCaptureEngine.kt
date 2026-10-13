@@ -49,10 +49,16 @@ class AudioCaptureEngine(
     private val _isCapturing = MutableStateFlow(false)
     val isCapturing: StateFlow<Boolean> = _isCapturing.asStateFlow()
 
-    private val _isLocalPlaybackEnabled = MutableStateFlow(true)
+    // CRITICAL: Local phone speaker monitor MUST default to FALSE (muted).
+    // Routing microphone input straight into the phone speaker creates an immediate,
+    // deafening acoustic feedback loop (howl-round).
+    private val _isLocalPlaybackEnabled = MutableStateFlow(false)
     val isLocalPlaybackEnabled: StateFlow<Boolean> = _isLocalPlaybackEnabled.asStateFlow()
 
-    private val _activeDeviceName = MutableStateFlow("Detecting USB Audio...")
+    private val _isUsbAudioConnected = MutableStateFlow(false)
+    val isUsbAudioConnected: StateFlow<Boolean> = _isUsbAudioConnected.asStateFlow()
+
+    private val _activeDeviceName = MutableStateFlow("Waiting for USB Audio...")
     val activeDeviceName: StateFlow<String> = _activeDeviceName.asStateFlow()
 
     var onAudioChunkCaptured: ((ByteArray) -> Unit)? = null
@@ -70,9 +76,11 @@ class AudioCaptureEngine(
                 override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
                     val usb = addedDevices?.firstOrNull { isUsbAudioDevice(it) }
                     if (usb != null) {
-                        onLog("TX-Audio", "USB Audio connected: ${usb.productName}", false)
-                        _activeDeviceName.value = usb.productName?.toString() ?: "USB Capture Audio"
-                        if (isRunning.get() && audioRecord == null) {
+                        val name = usb.productName?.toString() ?: "USB Capture Audio"
+                        onLog("TX-Audio", "USB Audio device connected: $name", false)
+                        _activeDeviceName.value = name
+                        _isUsbAudioConnected.value = true
+                        if (isRunning.get()) {
                             startCaptureLoop()
                         }
                     }
@@ -81,7 +89,17 @@ class AudioCaptureEngine(
                 override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
                     val usb = removedDevices?.firstOrNull { isUsbAudioDevice(it) }
                     if (usb != null) {
-                        onLog("TX-Audio", "USB Audio disconnected: ${usb.productName}", false)
+                        onLog("TX-Audio", "USB Audio device disconnected: ${usb.productName}", false)
+                        _isUsbAudioConnected.value = false
+                        _activeDeviceName.value = "No USB Audio (Phone Mic)"
+
+                        // Immediately kill local phone speaker to prevent howling feedback
+                        stopLocalPlayback()
+                        _isLocalPlaybackEnabled.value = false
+
+                        if (isRunning.get()) {
+                            startCaptureLoop()
+                        }
                     }
                 }
             }
@@ -108,19 +126,68 @@ class AudioCaptureEngine(
         return null
     }
 
+    /**
+     * Toggles local audio playback through the phone speaker.
+     * ANTI-FEEDBACK GUARD: Local speaker playback is strictly prohibited when using
+     * the phone's internal microphone, as doing so creates a violent howl-round.
+     */
     fun setLocalPlaybackEnabled(enabled: Boolean) {
+        if (enabled && !_isUsbAudioConnected.value) {
+            onLog(
+                "TX-Audio",
+                "Speaker monitor blocked: internal mic cannot be played on phone speaker (prevents howl-round). Connect a USB audio card first.",
+                true
+            )
+            _isLocalPlaybackEnabled.value = false
+            stopLocalPlayback()
+            return
+        }
+
         _isLocalPlaybackEnabled.value = enabled
         if (!enabled) {
-            try {
-                localAudioTrack?.pause()
-                localAudioTrack?.flush()
-            } catch (_: Exception) {}
+            stopLocalPlayback()
+            onLog("TX-Audio", "Phone speaker monitor muted", false)
         } else {
-            try {
-                localAudioTrack?.play()
-            } catch (_: Exception) {}
+            startLocalPlaybackWorker()
+            onLog("TX-Audio", "Phone speaker monitor enabled (USB Audio)", false)
         }
-        onLog("TX-Audio", if (enabled) "Phone speaker audio enabled" else "Phone speaker audio muted", false)
+    }
+
+    private fun stopLocalPlayback() {
+        localPlaybackJob?.cancel()
+        localPlaybackJob = null
+        try {
+            localAudioTrack?.stop()
+            localAudioTrack?.release()
+        } catch (_: Exception) {}
+        localAudioTrack = null
+    }
+
+    private fun startLocalPlaybackWorker() {
+        if (!_isUsbAudioConnected.value || !_isLocalPlaybackEnabled.value) {
+            stopLocalPlayback()
+            return
+        }
+
+        if (localAudioTrack == null) {
+            localAudioTrack = initLocalAudioTrack(SAMPLE_RATE)
+        }
+        try {
+            localAudioTrack?.play()
+        } catch (_: Exception) {}
+
+        if (localPlaybackJob?.isActive != true) {
+            localPlaybackJob = audioScope.launch {
+                while (isActive && isRunning.get()) {
+                    val chunk = localPlaybackChannel.receive()
+                    if (_isLocalPlaybackEnabled.value && _isUsbAudioConnected.value && localAudioTrack != null) {
+                        try {
+                            localAudioTrack?.write(chunk, 0, chunk.size)
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
     }
 
     fun start() {
@@ -132,7 +199,7 @@ class AudioCaptureEngine(
         ) == PackageManager.PERMISSION_GRANTED
 
         if (!hasPermission) {
-            onLog("TX-Audio", "Microphone/Audio permission required for HDMI audio capture.", false)
+            onLog("TX-Audio", "Microphone/Audio permission required for audio capture.", false)
             return
         }
 
@@ -142,32 +209,29 @@ class AudioCaptureEngine(
 
     private fun startCaptureLoop() {
         captureJob?.cancel()
-        localPlaybackJob?.cancel()
+        stopLocalPlayback()
 
-        // 1. Separate coroutine worker for local playback write (never blocks capture thread)
-        val track = initLocalAudioTrack(SAMPLE_RATE)
-        localAudioTrack = track
-        if (_isLocalPlaybackEnabled.value) {
-            try { track?.play() } catch (_: Exception) {}
+        // 1. Check for USB Audio hardware
+        val usbDevice = findUsbAudioDevice()
+        val isUsb = usbDevice != null
+        _isUsbAudioConnected.value = isUsb
+
+        val deviceName = if (isUsb) {
+            usbDevice?.productName?.toString() ?: "USB Capture Audio"
+        } else {
+            "No USB Audio (Phone Mic)"
+        }
+        _activeDeviceName.value = deviceName
+
+        // 2. Setup local speaker playback ONLY if explicitly enabled AND audio is from USB hardware
+        if (_isLocalPlaybackEnabled.value && isUsb) {
+            startLocalPlaybackWorker()
+        } else {
+            _isLocalPlaybackEnabled.value = false
         }
 
-        localPlaybackJob = audioScope.launch {
-            while (isActive && isRunning.get()) {
-                val chunk = localPlaybackChannel.receive()
-                if (_isLocalPlaybackEnabled.value && localAudioTrack != null) {
-                    try {
-                        localAudioTrack?.write(chunk, 0, chunk.size)
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-
-        // 2. High-priority capture loop reading from USB Audio
+        // 3. High-priority capture loop
         captureJob = audioScope.launch {
-            val usbDevice = findUsbAudioDevice()
-            val deviceName = usbDevice?.productName?.toString() ?: "USB Capture Audio"
-            _activeDeviceName.value = deviceName
-
             val minBufSize = maxOf(
                 AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_IN, AUDIO_FORMAT),
                 SAMPLE_RATE * 4 / 20 // 50ms buffer
@@ -185,7 +249,11 @@ class AudioCaptureEngine(
             try {
                 record.startRecording()
                 _isCapturing.value = true
-                onLog("TX-Audio", "Audio capturing from $deviceName (48kHz Stereo)", false)
+                if (isUsb) {
+                    onLog("TX-Audio", "Audio capturing from USB card: $deviceName (48kHz Stereo)", false)
+                } else {
+                    onLog("TX-Audio", "Audio capturing from mic (Local speaker muted to prevent howl-round)", false)
+                }
 
                 // 20ms chunks (48000 samples/sec * 4 bytes/sample / 50 = 3840 bytes)
                 val chunkSize = (SAMPLE_RATE * 4) / 50
@@ -196,12 +264,12 @@ class AudioCaptureEngine(
                     if (readBytes > 0) {
                         val chunkCopy = pcmBuffer.copyOf(readBytes)
 
-                        // Requirement C: On TX, the audio capture loop must never block on local playback write
-                        if (_isLocalPlaybackEnabled.value) {
+                        // ANTI-FEEDBACK: Only send to local phone speaker if capturing from USB hardware
+                        if (_isLocalPlaybackEnabled.value && _isUsbAudioConnected.value) {
                             localPlaybackChannel.trySend(chunkCopy)
                         }
 
-                        // Forward to network relay
+                        // Forward to network relay (stream to remote RX)
                         onAudioChunkCaptured?.invoke(chunkCopy)
                     }
                 }
@@ -265,7 +333,6 @@ class AudioCaptureEngine(
 
     private fun initLocalAudioTrack(sampleRate: Int): AudioTrack? {
         return try {
-            // Requirement C: AudioTrack: USAGE_GAME, PERFORMANCE_MODE_LOW_LATENCY, buffer size = AudioTrack.getMinBufferSize (not doubled)
             val minBufSize = AudioTrack.getMinBufferSize(sampleRate, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
             val attributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_GAME)
@@ -315,20 +382,13 @@ class AudioCaptureEngine(
         captureJob?.cancel()
         captureJob = null
 
-        localPlaybackJob?.cancel()
-        localPlaybackJob = null
+        stopLocalPlayback()
 
         try {
             audioRecord?.stop()
             audioRecord?.release()
         } catch (_: Exception) {}
         audioRecord = null
-
-        try {
-            localAudioTrack?.stop()
-            localAudioTrack?.release()
-        } catch (_: Exception) {}
-        localAudioTrack = null
     }
 
     fun release() {

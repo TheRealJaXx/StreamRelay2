@@ -53,6 +53,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -96,6 +97,9 @@ fun TxScreen(
     val usbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
     val isAudioStreaming by viewModel.isAudioStreaming.collectAsStateWithLifecycle()
+    val isLocalAudioEnabled by viewModel.isLocalAudioEnabled.collectAsStateWithLifecycle()
+    val isUsbAudioConnected by viewModel.isUsbAudioConnected.collectAsStateWithLifecycle()
+    val activeAudioDeviceName by viewModel.activeAudioDeviceName.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -167,12 +171,16 @@ fun TxScreen(
                 )
             }
 
-            // Capture Card Telemetry
+            // Capture Card Telemetry & Audio Status
             item {
                 TxTelemetryCard(
                     telemetry = telemetry,
                     usbDevice = uvcDevice,
                     isAudioStreaming = isAudioStreaming,
+                    isUsbAudioConnected = isUsbAudioConnected,
+                    activeAudioDeviceName = activeAudioDeviceName,
+                    isLocalAudioEnabled = isLocalAudioEnabled,
+                    onToggleLocalAudio = { viewModel.setLocalAudioEnabled(it) },
                     onRequestUsbPermission = { vid, pid ->
                         viewModel.requestUsbPermission(vid, pid)
                     }
@@ -367,6 +375,10 @@ private fun TxTelemetryCard(
     telemetry: CaptureTelemetry,
     usbDevice: UsbDeviceInfo?,
     isAudioStreaming: Boolean,
+    isUsbAudioConnected: Boolean,
+    activeAudioDeviceName: String,
+    isLocalAudioEnabled: Boolean,
+    onToggleLocalAudio: (Boolean) -> Unit,
     onRequestUsbPermission: (vendorId: Int, productId: Int) -> Unit
 ) {
     Card(
@@ -470,6 +482,95 @@ private fun TxTelemetryCard(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Grant USB Host Permission")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Audio Status & Anti-Howl Speaker Monitor Control
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (isUsbAudioConnected) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                                contentDescription = null,
+                                tint = if (isUsbAudioConnected) Color(0xFF10B981) else Color(0xFFF59E0B),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Audio Input",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Surface(
+                            color = if (isUsbAudioConnected) Color(0xFF10B981).copy(alpha = 0.15f) else Color(0xFFF59E0B).copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = if (isUsbAudioConnected) "USB HDMI Audio" else "Phone Mic",
+                                color = if (isUsbAudioConnected) Color(0xFF10B981) else Color(0xFFF59E0B),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = activeAudioDeviceName,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Transmitter Speaker Monitor",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = if (isUsbAudioConnected) {
+                                    if (isLocalAudioEnabled) "Monitoring USB HDMI audio through phone speaker"
+                                    else "Muted by default to avoid echo in room"
+                                } else {
+                                    "Muted & blocked on phone mic to prevent howl-round feedback"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Switch(
+                            checked = isLocalAudioEnabled,
+                            onCheckedChange = onToggleLocalAudio,
+                            enabled = isUsbAudioConnected,
+                            modifier = Modifier.testTag("tx_audio_monitor_switch")
+                        )
+                    }
                 }
             }
         }
