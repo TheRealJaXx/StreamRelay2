@@ -78,6 +78,8 @@ import com.example.model.LogEntry
 import com.example.model.UsbDeviceInfo
 import com.example.relay.TxRelayStats
 
+import com.example.BuildConfig
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TxScreen(
@@ -93,9 +95,7 @@ fun TxScreen(
     val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
     val usbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
-    val isLocalPreviewEnabled by viewModel.isLocalPreviewEnabled.collectAsStateWithLifecycle()
     val isAudioStreaming by viewModel.isAudioStreaming.collectAsStateWithLifecycle()
-    val isLocalAudioEnabled by viewModel.isLocalAudioEnabled.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -113,7 +113,7 @@ fun TxScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Transmitter · Port $txPort",
+                            text = "Transmitter · Port $txPort · v${BuildConfig.VERSION_NAME}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -182,18 +182,6 @@ fun TxScreen(
             // Requirement E: TX On-Screen Diagnostics Card
             item {
                 TxRelayDiagnosticsCard(txStats = txStats)
-            }
-
-            // Live Video Preview Card with Enable / Disable Toggle
-            item {
-                TxPreviewCard(
-                    isPreviewEnabled = isLocalPreviewEnabled,
-                    isAudioEnabled = isLocalAudioEnabled,
-                    onTogglePreview = { enabled -> viewModel.setLocalPreviewEnabled(enabled) },
-                    onToggleAudio = { enabled -> viewModel.setLocalAudioEnabled(enabled) },
-                    onSurfaceReady = { holder -> viewModel.setLocalPreviewHolder(holder) },
-                    onSurfaceDestroyed = { viewModel.setLocalPreviewHolder(null) }
-                )
             }
 
             // Hardware Diagnostic Logs
@@ -532,6 +520,8 @@ private fun DiagnosticLogsSection(
     logs: List<LogEntry>,
     onClearLogs: () -> Unit
 ) {
+    var showLogs by remember { mutableStateOf(false) }
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -562,218 +552,77 @@ private fun DiagnosticLogsSection(
                     )
                 }
 
-                TextButton(onClick = onClearLogs) {
-                    Text("Clear")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(140.dp),
-                color = Color(0xFF0F172A),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                if (logs.isEmpty()) {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "No log events yet",
-                            color = Color(0xFF64748B),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace
-                        )
+                Row {
+                    TextButton(onClick = { showLogs = !showLogs }) {
+                        Text(if (showLogs) "Collapse" else "Expand (${logs.size})")
                     }
-                } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(8.dp)
-                            .verticalScroll(rememberScrollState()),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        logs.take(50).forEach { log ->
-                            Row(modifier = Modifier.fillMaxWidth()) {
-                                Text(
-                                    text = log.timestamp,
-                                    color = Color(0xFF64748B),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 10.sp
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "[${log.tag}]",
-                                    color = if (log.isError) Color(0xFFF87171) else Color(0xFF38BDF8),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.sp
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = log.message,
-                                    color = if (log.isError) Color(0xFFFCA5A5) else Color(0xFFE2E8F0),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontSize = 11.sp
-                                )
-                            }
+                    if (showLogs) {
+                        TextButton(onClick = onClearLogs) {
+                            Text("Clear")
                         }
                     }
                 }
             }
-        }
-    }
-}
 
-@Composable
-private fun TxPreviewCard(
-    isPreviewEnabled: Boolean,
-    isAudioEnabled: Boolean,
-    onTogglePreview: (Boolean) -> Unit,
-    onToggleAudio: (Boolean) -> Unit,
-    onSurfaceReady: (SurfaceHolder) -> Unit,
-    onSurfaceDestroyed: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Videocam,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Local Video Preview",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+            if (showLogs) {
+                Spacer(modifier = Modifier.height(8.dp))
 
-                FilledTonalButton(
-                    onClick = { onTogglePreview(!isPreviewEnabled) }
-                ) {
-                    Icon(
-                        imageVector = if (isPreviewEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(if (isPreviewEnabled) "Hide Preview" else "Show Preview")
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            if (isPreviewEnabled) {
-                Box(
+                Surface(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(16f / 9f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color.Black)
-                        .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
-                    contentAlignment = Alignment.Center
+                        .height(140.dp),
+                    color = Color(0xFF0F172A),
+                    shape = RoundedCornerShape(8.dp)
                 ) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { ctx ->
-                            SurfaceView(ctx).apply {
-                                holder.addCallback(object : SurfaceHolder.Callback {
-                                    override fun surfaceCreated(holder: SurfaceHolder) {
-                                        onSurfaceReady(holder)
-                                    }
-
-                                    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
-                                        onSurfaceReady(holder)
-                                    }
-
-                                    override fun surfaceDestroyed(holder: SurfaceHolder) {
-                                        onSurfaceDestroyed()
-                                    }
-                                })
+                    if (logs.isEmpty()) {
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No log events yet",
+                                color = Color(0xFF64748B),
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(8.dp)
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            logs.take(50).forEach { log ->
+                                Row(modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        text = log.timestamp,
+                                        color = Color(0xFF64748B),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "[${log.tag}]",
+                                        color = if (log.isError) Color(0xFFF87171) else Color(0xFF38BDF8),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = log.message,
+                                        color = if (log.isError) Color(0xFFFCA5A5) else Color(0xFFE2E8F0),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp
+                                    )
+                                }
                             }
                         }
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = if (isAudioEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
-                                contentDescription = null,
-                                tint = if (isAudioEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (isAudioEnabled) "Phone Speaker: ON" else "Phone Speaker: MUTED",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-
-                        FilledTonalButton(
-                            onClick = { onToggleAudio(!isAudioEnabled) }
-                        ) {
-                            Text(if (isAudioEnabled) "Mute Speaker" else "Hear Sound")
-                        }
-                    }
-                }
-            } else {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.VideocamOff,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(
-                            text = "Local preview is hidden. Capture card continues relaying over network.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
             }

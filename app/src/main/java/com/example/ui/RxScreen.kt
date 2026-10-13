@@ -43,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,16 +52,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.BuildConfig
 import com.example.relay.RxConnectionState
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -71,7 +75,6 @@ fun RxScreen(
 ) {
     val context = LocalContext.current
     val connectionState by viewModel.rxConnectionState.collectAsStateWithLifecycle()
-    val bitmap by viewModel.rxBitmap.collectAsStateWithLifecycle()
     val stats by viewModel.rxStats.collectAsStateWithLifecycle()
     val targetIp by viewModel.rxTargetIp.collectAsStateWithLifecycle()
     val targetPort by viewModel.rxTargetPort.collectAsStateWithLifecycle()
@@ -83,6 +86,14 @@ fun RxScreen(
 
     // Toggle overlay on screen tap
     var showOverlay by remember { mutableStateOf(true) }
+
+    // Auto-hide overlay after 4 seconds of active connected streaming
+    LaunchedEffect(showOverlay, connectionState, stats.videoPacketsReceived) {
+        if (showOverlay && connectionState == RxConnectionState.CONNECTED && stats.videoPacketsReceived > 30) {
+            delay(4000)
+            showOverlay = false
+        }
+    }
 
     // Keep screen on while in RX mode
     DisposableEffect(Unit) {
@@ -104,42 +115,18 @@ fun RxScreen(
                 showOverlay = !showOverlay
             }
     ) {
-        // Fullscreen Video Rendering (Preserving Aspect Ratio)
-        if (bitmap != null) {
-            Image(
-                bitmap = bitmap!!.asImageBitmap(),
-                contentDescription = "Relayed Video Feed",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Fit
-            )
-        } else {
-            // Idle placeholder
-            Column(
-                modifier = Modifier.align(Alignment.Center),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Tv,
-                    contentDescription = null,
-                    tint = Color(0xFF475569),
-                    modifier = Modifier.size(64.dp)
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                Text(
-                    text = when (connectionState) {
-                        RxConnectionState.CONNECTING -> stats.statusDetail
-                        RxConnectionState.RECONNECTING -> stats.statusDetail
-                        RxConnectionState.CONNECTED -> if (stats.videoPacketsReceived == 0L) stats.statusDetail else "Waiting for video frame..."
-                        RxConnectionState.DISCONNECTED -> "Receiver Ready"
-                    },
-                    color = Color(0xFF94A3B8),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-        }
+        // 1. ISOLATED VIDEO VIEWPORT:
+        // Reads viewModel.rxBitmap in its own isolated Composable scope so 60 FPS frame emissions
+        // never trigger recomposition of the parent RxScreen, overlay, or control cards!
+        RxVideoFeed(
+            viewModel = viewModel,
+            connectionState = connectionState,
+            statusDetail = stats.statusDetail,
+            videoPacketsReceived = stats.videoPacketsReceived,
+            modifier = Modifier.fillMaxSize()
+        )
 
-        // Animated UI Overlay (Top and Bottom Controls)
+        // 2. Animated UI Overlay (Top and Bottom Controls)
         AnimatedVisibility(
             visible = showOverlay,
             enter = fadeIn(),
@@ -182,7 +169,7 @@ fun RxScreen(
                                 color = Color.White
                             )
                             Text(
-                                text = "Tap screen to toggle overlay",
+                                text = "Receiver · v${BuildConfig.VERSION_NAME}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Color(0xFF94A3B8)
                             )
@@ -223,7 +210,7 @@ fun RxScreen(
                     }
                 }
 
-                // Requirement E: Comprehensive Diagnostics Panel (visible in the RX stats panel)
+                // Diagnostics Panel (visible in the RX stats panel)
                 if (connectionState != RxConnectionState.DISCONNECTED || stats.videoPacketsReceived > 0L) {
                     Surface(
                         modifier = Modifier
@@ -459,6 +446,7 @@ fun RxScreen(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(48.dp)
+                                    .testTag("connect_rx_button")
                             ) {
                                 Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null)
                                 Spacer(modifier = Modifier.width(8.dp))
@@ -468,6 +456,59 @@ fun RxScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+/**
+ * Isolated Video Rendering Composable.
+ * By moving rxBitmap observation into this isolated leaf composable,
+ * high-frequency frame updates (60 FPS) only recompose this component,
+ * completely shielding RxScreen, overlay cards, and text fields from constant recomposition.
+ */
+@Composable
+private fun RxVideoFeed(
+    viewModel: CaptureViewModel,
+    connectionState: RxConnectionState,
+    statusDetail: String,
+    videoPacketsReceived: Long,
+    modifier: Modifier = Modifier
+) {
+    val bitmap by viewModel.rxBitmap.collectAsStateWithLifecycle()
+
+    if (bitmap != null) {
+        Image(
+            bitmap = remember(bitmap) { bitmap!!.asImageBitmap() },
+            contentDescription = "Relayed Video Feed",
+            modifier = modifier,
+            contentScale = ContentScale.Fit,
+            filterQuality = FilterQuality.Medium
+        )
+    } else {
+        // Idle placeholder
+        Column(
+            modifier = modifier,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Tv,
+                contentDescription = null,
+                tint = Color(0xFF475569),
+                modifier = Modifier.size(64.dp)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = when (connectionState) {
+                    RxConnectionState.CONNECTING -> statusDetail
+                    RxConnectionState.RECONNECTING -> statusDetail
+                    RxConnectionState.CONNECTED -> if (videoPacketsReceived == 0L) statusDetail else "Waiting for video frame..."
+                    RxConnectionState.DISCONNECTED -> "Receiver Ready"
+                },
+                color = Color(0xFF94A3B8),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Medium
+            )
         }
     }
 }
