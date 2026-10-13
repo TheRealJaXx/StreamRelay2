@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.streamrelay.mskq"
     minSdk = 24
     targetSdk = 36
-    versionCode = 3
-    versionName = "beta-v1_03"
+    versionCode = 4
+    versionName = "beta-v1_04"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

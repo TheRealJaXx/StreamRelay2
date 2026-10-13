@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.AppMode
 import com.example.ui.CaptureViewModel
+import com.example.ui.LatencyTestScreen
 import com.example.ui.ModeSelectionScreen
 import com.example.ui.RxScreen
 import com.example.ui.TxScreen
@@ -86,6 +87,12 @@ class MainActivity : ComponentActivity() {
             }
             AppMode.RX -> {
               RxScreen(
+                viewModel = viewModel,
+                onChangeMode = { viewModel.selectMode(AppMode.UNSELECTED) }
+              )
+            }
+            AppMode.TEST_TX -> {
+              LatencyTestScreen(
                 viewModel = viewModel,
                 onChangeMode = { viewModel.selectMode(AppMode.UNSELECTED) }
               )

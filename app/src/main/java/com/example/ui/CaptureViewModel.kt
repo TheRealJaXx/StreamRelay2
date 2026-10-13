@@ -30,10 +30,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+import android.graphics.Bitmap
+import com.example.relay.LatencyTestEngine
+
 enum class AppMode {
     UNSELECTED,
-    TX, // Transmitter
-    RX  // Receiver
+    TX,     // Transmitter (USB Capture)
+    RX,     // Receiver
+    TEST_TX // Latency Test Pattern (Hardware-free)
 }
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
@@ -109,6 +113,26 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val rxConnectionState: StateFlow<RxConnectionState> = relayClient.connectionState
     val rxBitmap = relayClient.currentBitmap
     val rxStats: StateFlow<RxStats> = relayClient.stats
+
+    // Hardware-Free Latency Test Pattern Engine (TX)
+    val latencyTestEngine = LatencyTestEngine(
+        onFrameGenerated = { jpegBytes ->
+            relayServer.recordFrameCaptured()
+            relayServer.submitFrame(jpegBytes)
+        },
+        onAudioChunkGenerated = { pcmBytes ->
+            relayServer.submitAudio(pcmBytes)
+        }
+    )
+
+    val testPatternBitmap: StateFlow<Bitmap?> = latencyTestEngine.currentBitmap
+    val testFramesGenerated: StateFlow<Long> = latencyTestEngine.framesGenerated
+
+    private val _testFps = MutableStateFlow(prefs.getInt("pref_test_fps", 60))
+    val testFps: StateFlow<Int> = _testFps.asStateFlow()
+
+    private val _testAudioTick = MutableStateFlow(prefs.getBoolean("pref_test_audio_tick", true))
+    val testAudioTick: StateFlow<Boolean> = _testAudioTick.asStateFlow()
 
     // Local Video Preview toggle on Transmitter (TX)
     private val _isLocalPreviewEnabled = MutableStateFlow(false)
@@ -214,11 +238,24 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
+    fun setTestFps(fps: Int) {
+        _testFps.value = fps
+        prefs.edit().putInt("pref_test_fps", fps).apply()
+        latencyTestEngine.setTargetFps(fps)
+    }
+
+    fun setTestAudioTick(enabled: Boolean) {
+        _testAudioTick.value = enabled
+        prefs.edit().putBoolean("pref_test_audio_tick", enabled).apply()
+        latencyTestEngine.setAudioTick(enabled)
+    }
+
     fun selectMode(mode: AppMode) {
         _currentMode.value = mode
 
         when (mode) {
             AppMode.TX -> {
+                latencyTestEngine.stop()
                 relayClient.disconnect()
                 refreshLocalIp()
                 usbMonitor.start()
@@ -232,7 +269,21 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 startTxRelayServer(_txPort.value)
                 startCapture()
             }
+            AppMode.TEST_TX -> {
+                _isLocalPreviewEnabled.value = false
+                currentLocalHolder = null
+                relayClient.disconnect()
+                uvcCaptureEngine.stopCapture()
+                uvcCaptureEngine.setPreviewSurface(null)
+                releaseOffscreenSurface()
+                usbMonitor.stop()
+
+                refreshLocalIp()
+                startTxRelayServer(_txPort.value)
+                latencyTestEngine.start(_testFps.value, _testAudioTick.value)
+            }
             AppMode.RX -> {
+                latencyTestEngine.stop()
                 _isLocalPreviewEnabled.value = false
                 currentLocalHolder = null
                 stopTxRelayServer()
@@ -242,6 +293,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 usbMonitor.stop()
             }
             AppMode.UNSELECTED -> {
+                latencyTestEngine.stop()
                 _isLocalPreviewEnabled.value = false
                 currentLocalHolder = null
                 stopTxRelayServer()
@@ -354,6 +406,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     override fun onCleared() {
         super.onCleared()
+        latencyTestEngine.stop()
         _isLocalPreviewEnabled.value = false
         currentLocalHolder = null
         stopTxRelayServer()

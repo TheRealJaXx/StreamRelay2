@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Cable
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -101,6 +102,15 @@ fun ModeSelectionScreen(
                     iconTint = Color(0xFF10B981),
                     testTag = "receiver_button",
                     onClick = { onSelectMode(AppMode.RX) }
+                )
+
+                // Latency Test option
+                SimpleModeCard(
+                    title = "Latency Test",
+                    icon = Icons.Default.Speed,
+                    iconTint = Color(0xFFF59E0B),
+                    testTag = "latency_test_button",
+                    onClick = { onSelectMode(AppMode.TEST_TX) }
                 )
             }
         }
