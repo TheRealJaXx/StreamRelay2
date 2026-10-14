@@ -234,6 +234,14 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         relayClient.setMuted(muted)
     }
 
+    fun attachRxSurface(holder: SurfaceHolder) {
+        relayClient.attachSurface(holder)
+    }
+
+    fun detachRxSurface(holder: SurfaceHolder) {
+        relayClient.detachSurface(holder)
+    }
+
     fun onAudioPermissionGranted() {
         if (_currentMode.value == AppMode.TX) {
             audioCaptureEngine.start()

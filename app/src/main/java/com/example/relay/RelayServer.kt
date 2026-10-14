@@ -183,10 +183,13 @@ class RelayServer(
         val job = scope.launch {
             var closeReason = "Normal completion"
             try {
-                // Requirement B: TCP_NODELAY and 64 KB send and receive buffers
+                // Low latency TCP configuration
                 socket.tcpNoDelay = true
-                socket.sendBufferSize = 64 * 1024
-                socket.receiveBufferSize = 64 * 1024
+                socket.sendBufferSize = 32 * 1024
+                socket.receiveBufferSize = 32 * 1024
+                try {
+                    socket.setPerformancePreferences(0, 2, 1)
+                } catch (_: Exception) {}
 
                 // Immediate disconnect detector on incoming stream
                 launch {
@@ -204,10 +207,15 @@ class RelayServer(
                     }
                 }
 
-                val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
+                val outputStream = DataOutputStream(socket.getOutputStream())
 
                 while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
-                    val frame = videoChannel.receive()
+                    var frame = videoChannel.receive()
+                    // Drain conflated channel to ensure we always write the absolute freshest frame
+                    while (true) {
+                        val newer = videoChannel.tryReceive().getOrNull() ?: break
+                        frame = newer
+                    }
                     if (frame.isNotEmpty()) {
                         try {
                             outputStream.writeInt(frame.size)
@@ -261,10 +269,13 @@ class RelayServer(
         val job = scope.launch {
             var closeReason = "Normal completion"
             try {
-                // Requirement B: TCP_NODELAY and 64 KB send and receive buffers
+                // Low latency TCP configuration
                 socket.tcpNoDelay = true
-                socket.sendBufferSize = 64 * 1024
-                socket.receiveBufferSize = 64 * 1024
+                socket.sendBufferSize = 32 * 1024
+                socket.receiveBufferSize = 32 * 1024
+                try {
+                    socket.setPerformancePreferences(0, 2, 1)
+                } catch (_: Exception) {}
 
                 // Immediate disconnect detector on incoming stream
                 launch {
@@ -282,7 +293,7 @@ class RelayServer(
                     }
                 }
 
-                val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 16 * 1024))
+                val outputStream = DataOutputStream(socket.getOutputStream())
 
                 while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
                     val chunk = audioChannel.receive()

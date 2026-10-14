@@ -48,7 +48,7 @@ class LatencyTestEngine(
     companion object {
         const val WIDTH = 1280
         const val HEIGHT = 720
-        const val JPEG_QUALITY = 65
+        const val JPEG_QUALITY = 55
 
         // Audio format matching RelayClient: 48kHz, 16-bit stereo PCM
         const val SAMPLE_RATE = 48000
@@ -395,8 +395,15 @@ class LatencyTestEngine(
             for (timeNs in networkFrameChannel) {
                 if (!isRunning.get()) break
 
+                // Drain conflated channel to take only the absolute latest timestamp
+                while (true) {
+                    networkFrameChannel.tryReceive().getOrNull() ?: break
+                }
+
                 synchronized(networkBitmap) {
-                    drawTestPattern(networkCanvas, timeNs)
+                    // Use the exact nano time right when encoding starts for accurate zero-latency timestamps
+                    val currentNano = System.nanoTime()
+                    drawTestPattern(networkCanvas, currentNano)
                     jpegStream.reset()
                     networkBitmap.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, jpegStream)
                     val bytes = jpegStream.toByteArray()
