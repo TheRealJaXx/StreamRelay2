@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedOutputStream
 import java.io.DataOutputStream
 import java.io.IOException
@@ -179,6 +180,8 @@ class RelayServer(
         // Requirement B: Video: keep only the newest frame
         val videoChannel = Channel<ByteArray>(Channel.CONFLATED)
 
+        val ackChannel = Channel<Unit>(Channel.CONFLATED)
+
         lateinit var session: VideoClientSession
         val job = scope.launch {
             var closeReason = "Normal completion"
@@ -191,7 +194,7 @@ class RelayServer(
                     socket.setPerformancePreferences(0, 2, 1)
                 } catch (_: Exception) {}
 
-                // Immediate disconnect detector on incoming stream
+                // Immediate disconnect detector & ACK reader on incoming stream
                 launch {
                     try {
                         val input = socket.getInputStream()
@@ -199,6 +202,10 @@ class RelayServer(
                         while (isActive && !socket.isClosed && socket.isConnected) {
                             val r = input.read(dummy)
                             if (r == -1) break
+                            if (r > 0) {
+                                // Client acknowledged frame received - ready for next frame!
+                                ackChannel.trySend(Unit)
+                            }
                         }
                     } catch (_: Exception) {}
                     if (isActive) {
@@ -208,6 +215,9 @@ class RelayServer(
                 }
 
                 val outputStream = DataOutputStream(socket.getOutputStream())
+
+                // Initial state: ready to send first frame
+                ackChannel.trySend(Unit)
 
                 while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
                     var frame = videoChannel.receive()
@@ -223,6 +233,13 @@ class RelayServer(
                             outputStream.flush()
                             framesSentCount++
                             maybeUpdateStats()
+
+                            // Ultra-low latency pacing: wait for client ACK before sending next frame.
+                            // If receiver is decoding or network has jitter, videoChannel drops stale frames.
+                            // Safety timeout of 45ms ensures we never freeze if an ACK packet is lost.
+                            withTimeoutOrNull(45L) {
+                                ackChannel.receive()
+                            }
                         } catch (e: IOException) {
                             closeReason = "Write failed: ${e.message ?: "Broken pipe"}"
                             break

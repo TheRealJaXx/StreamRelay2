@@ -296,28 +296,12 @@ class RelayClient(
                     videoBytesCounter += length + 4
                     lastVideoPacketTimestamp = SystemClock.elapsedRealtime()
 
-                    // LOW-LATENCY CATCH-UP / BACKLOG DRAIN:
-                    // If network jitter or slow decode caused 1 or more frames to queue in the socket buffer:
-                    // Drain the older frames so the decoder ALWAYS receives the latest real-time frame!
-                    while (isRunning.get() && gen == connectionGeneration.get() && !s.isClosed) {
-                        val avail = bufferedIn.available()
-                        if (avail >= 4) {
-                            bufferedIn.mark(4)
-                            val nextLength = inputStream.readInt()
-                            if (nextLength in 1..10_000_000 && avail >= 4 + nextLength) {
-                                frameBytes = ByteArray(nextLength)
-                                inputStream.readFully(frameBytes)
-                                videoPacketsCount++
-                                videoBytesCounter += nextLength + 4
-                                continue
-                            } else {
-                                bufferedIn.reset()
-                                break
-                            }
-                        } else {
-                            break
-                        }
-                    }
+                    // Send ACK back to server immediately to pace frames with zero TCP buffer bloat
+                    try {
+                        val out = s.getOutputStream()
+                        out.write(6)
+                        out.flush()
+                    } catch (_: Exception) {}
 
                     // Conflated handoff to decoder
                     videoReceiveChannel.trySend(frameBytes)
@@ -530,7 +514,12 @@ class RelayClient(
             var currentFrameSize = 0
 
             while (isActive && isRunning.get() && gen == connectionGeneration.get()) {
-                val frame = videoReceiveChannel.receive()
+                var frame = videoReceiveChannel.receive()
+                // Drop and forget older intermediate frames if newer arrived while decoding
+                while (true) {
+                    val newer = videoReceiveChannel.tryReceive().getOrNull() ?: break
+                    frame = newer
+                }
 
                 if (frame.isNotEmpty()) {
                     currentFrameSize = frame.size

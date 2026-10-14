@@ -97,6 +97,12 @@ class MainActivity : ComponentActivity() {
                 onChangeMode = { viewModel.selectMode(AppMode.UNSELECTED) }
               )
             }
+            AppMode.ROUND_TRIP -> {
+              RoundTripScreen(
+                viewModel = viewModel,
+                onChangeMode = { viewModel.selectMode(AppMode.UNSELECTED) }
+              )
+            }
           }
         }
       }

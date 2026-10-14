@@ -43,6 +43,7 @@ class UvcCaptureEngine(
     private var lastFpsMeasureTime = 0L
     private var sessionStartTime = 0L
     private var totalFramesCounter = 0L
+    private var lastFrameDeliveredNs = 0L
 
     var onRawFrameCaptured: ((ByteArray) -> Unit)? = null
 
@@ -212,11 +213,17 @@ class UvcCaptureEngine(
                         }
 
                         if (sizeBytes > 0 && onRawFrameCaptured != null) {
-                            val rawBytes = ByteArray(sizeBytes)
-                            val pos = byteBuffer.position()
-                            byteBuffer.get(rawBytes)
-                            byteBuffer.position(pos)
-                            onRawFrameCaptured?.invoke(rawBytes)
+                            val targetFps = selectedPreset.targetFps
+                            val minIntervalNs = if (targetFps > 0) (1_000_000_000L / targetFps) - 2_500_000L else 0L
+                            val nowNs = System.nanoTime()
+                            if (minIntervalNs <= 0L || (nowNs - lastFrameDeliveredNs) >= minIntervalNs) {
+                                lastFrameDeliveredNs = nowNs
+                                val rawBytes = ByteArray(sizeBytes)
+                                val pos = byteBuffer.position()
+                                byteBuffer.get(rawBytes)
+                                byteBuffer.position(pos)
+                                onRawFrameCaptured?.invoke(rawBytes)
+                            }
                         }
                     }, UVCCamera.PIXEL_FORMAT_RAW)
                 } catch (e: Exception) {

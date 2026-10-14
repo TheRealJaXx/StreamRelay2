@@ -489,10 +489,9 @@ class LatencyTestEngine(
         c.drawText(frameText, 1060f, 52f, monoInfoPaint)
         c.drawLine(40f, 92f, 1240f, 92f, floorPaint)
 
-        // Continuous high-precision fractional time calculations from nanoseconds
-        val fractionalSec = (timeNs % 60_000_000_000L).toDouble() / 1_000_000_000.0
-        val fractionalMillis = (timeNs % 1_000_000_000L).toDouble() / 1_000_000.0
-        val millisInt = fractionalMillis.toInt()
+        // Continuous high-precision fractional time calculations synchronized to epoch
+        val millisInt = (nowMs % 1000L).toInt()
+        val fractionalSec = (nowMs % 60000L).toDouble() / 1000.0
 
         calendar.timeInMillis = nowMs
         val hours = calendar.get(Calendar.HOUR)
@@ -548,8 +547,8 @@ class LatencyTestEngine(
         c.drawText("250", subCx + subRadius - 10f, subCy + 4f, subNumPaint)
         c.drawText("750", subCx - subRadius + 10f, subCy + 4f, subNumPaint)
 
-        // Continuous Sub-Dial Millisecond Hand
-        val subAngle = (fractionalMillis / 1000.0) * 2.0 * PI
+        // Continuous Sub-Dial Millisecond Hand (100% in sync with .000 - .999 digital slate)
+        val subAngle = (millisInt / 1000.0) * 2.0 * PI
         val subLen = 30f
         c.drawLine(subCx, subCy, subCx + (subLen * sin(subAngle)).toFloat(), subCy - (subLen * cos(subAngle)).toFloat(), subDialHandPaint)
         c.drawCircle(subCx, subCy, 3f, subDialHandPaint)
@@ -606,8 +605,8 @@ class LatencyTestEngine(
             c.drawText("${step * 25}%", mx - 12f, trackY + 26f, smallLabelPaint)
         }
 
-        // Oscillating pointer with nanosecond continuous phase
-        val oscPhase = ((timeNs % 2_000_000_000L).toDouble() / 2_000_000_000.0) * 2.0 * PI
+        // Oscillating pointer with 2-second cycle
+        val oscPhase = ((nowMs % 2000L).toDouble() / 2000.0) * 2.0 * PI
         val progress = (sin(oscPhase) + 1.0) / 2.0
         val markerX = (trackX1 + progress * trackW).toFloat()
         c.drawLine(markerX, trackY - 18f, markerX, trackY + 18f, secondHandPaint)
@@ -621,17 +620,17 @@ class LatencyTestEngine(
             c.drawLine(gx.toFloat(), floorY, (gx - 15).toFloat(), floorY + 15f, gridPaint)
         }
 
-        // Parabolic physics: h(t) = 4 * H * t * (1 - t) where t in [0, 1]
-        val bouncePeriodNs = 1_100_000_000L // 1.1s per bounce
-        val t = (timeNs % bouncePeriodNs).toDouble() / bouncePeriodNs.toDouble()
+        // Parabolic physics: 1-second bounce cycle
+        val bouncePeriodMs = 1000L
+        val t = (nowMs % bouncePeriodMs).toDouble() / bouncePeriodMs.toDouble()
         val parabolicH = (4.0 * t * (1.0 - t)).toFloat() // 0.0 at ground, 1.0 at apex
         val bounceHeight = 110f
         val ballRadius = 24f
         val ballY = floorY - ballRadius - (bounceHeight * parabolicH)
 
-        // Smooth horizontal sweep across ground (6s cycle)
-        val horizPeriodNs = 6_000_000_000L
-        val hPhase = ((timeNs % horizPeriodNs).toDouble() / horizPeriodNs.toDouble()) * 2.0 * PI
+        // Smooth horizontal sweep across ground (4s cycle)
+        val horizPeriodMs = 4000L
+        val hPhase = ((nowMs % horizPeriodMs).toDouble() / horizPeriodMs.toDouble()) * 2.0 * PI
         val ballX = (640.0 + 520.0 * sin(hPhase)).toFloat()
 
         // Ground shadow scaling dynamically with altitude

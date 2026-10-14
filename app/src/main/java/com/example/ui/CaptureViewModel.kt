@@ -35,9 +35,15 @@ import com.example.relay.LatencyTestEngine
 
 enum class AppMode {
     UNSELECTED,
-    TX,     // Transmitter (USB Capture)
-    RX,     // Receiver
-    TEST_TX // Latency Test Pattern (Hardware-free)
+    TX,         // Transmitter (USB Capture)
+    RX,         // Receiver
+    TEST_TX,    // Latency Test Pattern (Hardware-free)
+    ROUND_TRIP  // Side-by-side Outgoing vs Incoming Loopback
+}
+
+enum class RoundTripSource {
+    TEST_PATTERN,
+    HDMI_CAPTURE
 }
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
@@ -51,6 +57,10 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     // Mode selection - asked fresh on every launch
     private val _currentMode = MutableStateFlow(AppMode.UNSELECTED)
     val currentMode: StateFlow<AppMode> = _currentMode.asStateFlow()
+
+    // Round Trip Source toggle
+    private val _roundTripSource = MutableStateFlow(RoundTripSource.TEST_PATTERN)
+    val roundTripSource: StateFlow<RoundTripSource> = _roundTripSource.asStateFlow()
 
     // TX network settings
     private val _localIp = MutableStateFlow(NetworkUtils.getLocalIpAddress())
@@ -66,11 +76,13 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     private val _rxTargetPort = MutableStateFlow(prefs.getInt("pref_rx_port", 4120))
     val rxTargetPort: StateFlow<Int> = _rxTargetPort.asStateFlow()
 
-    // Hardware capture services (TX)
+    // Hardware capture services (TX) - 720p30 & 720p60 selectable
     val availablePresets: List<StreamPreset> = listOf(
-        StreamPreset("mjpeg_720p", "720p (60 FPS)", 1280, 720, "Recommended for PS3 · 60 FPS · Lowest Latency"),
-        StreamPreset("mjpeg_1080p", "1080p (30-60 FPS)", 1920, 1080, "Full HD · 30-60 FPS"),
-        StreamPreset("mjpeg_480p", "480p (60 FPS)", 640, 480, "Ultra Fast · Lowest Bandwidth")
+        StreamPreset("mjpeg_720p_30", "720p (30 FPS)", 1280, 720, "Smooth 30 FPS · Lowest Bandwidth & Zero Lag", targetFps = 30),
+        StreamPreset("mjpeg_720p_60", "720p (60 FPS)", 1280, 720, "High Motion 60 FPS · PS3 & Console Capture", targetFps = 60),
+        StreamPreset("mjpeg_1080p_30", "1080p (30 FPS)", 1920, 1080, "Full HD · 30 FPS", targetFps = 30),
+        StreamPreset("mjpeg_1080p_60", "1080p (60 FPS)", 1920, 1080, "Full HD · 60 FPS", targetFps = 60),
+        StreamPreset("mjpeg_480p_30", "480p (30 FPS)", 640, 480, "Ultra Fast · Lowest Bandwidth", targetFps = 30)
     )
 
     private val _selectedPreset = MutableStateFlow(availablePresets[0])
@@ -304,6 +316,27 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 releaseOffscreenSurface()
                 usbMonitor.stop()
             }
+            AppMode.ROUND_TRIP -> {
+                audioCaptureEngine.stop()
+                _isLocalPreviewEnabled.value = true
+                refreshLocalIp()
+                startTxRelayServer(_txPort.value)
+                if (_roundTripSource.value == RoundTripSource.TEST_PATTERN) {
+                    uvcCaptureEngine.stopCapture()
+                    releaseOffscreenSurface()
+                    latencyTestEngine.start(_testFps.value, audioTick = false)
+                } else {
+                    latencyTestEngine.stop()
+                    usbMonitor.start()
+                    val targetSurface = if (currentLocalHolder != null) currentLocalHolder!! else ensureOffscreenSurface()
+                    uvcCaptureEngine.setPreviewSurface(targetSurface)
+                    uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
+                    startCapture()
+                }
+                // Connect RX to local loopback server with AUDIO STRICTLY MUTED to prevent howl round
+                relayClient.setMuted(true)
+                relayClient.connect("127.0.0.1", _txPort.value)
+            }
             AppMode.UNSELECTED -> {
                 latencyTestEngine.stop()
                 audioCaptureEngine.stop()
@@ -316,6 +349,34 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 releaseOffscreenSurface()
                 usbMonitor.stop()
             }
+        }
+    }
+
+    fun setRoundTripSource(source: RoundTripSource) {
+        _roundTripSource.value = source
+        if (_currentMode.value == AppMode.ROUND_TRIP) {
+            if (source == RoundTripSource.TEST_PATTERN) {
+                uvcCaptureEngine.stopCapture()
+                releaseOffscreenSurface()
+                latencyTestEngine.start(_testFps.value, audioTick = false)
+            } else {
+                latencyTestEngine.stop()
+                usbMonitor.start()
+                val targetSurface = if (currentLocalHolder != null) currentLocalHolder!! else ensureOffscreenSurface()
+                uvcCaptureEngine.setPreviewSurface(targetSurface)
+                uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
+                startCapture()
+            }
+        }
+    }
+
+    fun setFpsOption(fps: Int) {
+        setTestFps(fps)
+        val currentPreset = _selectedPreset.value
+        val newPreset = availablePresets.firstOrNull { it.targetFps == fps && it.height == currentPreset.height }
+            ?: availablePresets.firstOrNull { it.targetFps == fps }
+        if (newPreset != null) {
+            selectPreset(newPreset)
         }
     }
 
@@ -343,7 +404,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     fun startTxRelayServer(port: Int = _txPort.value) {
         refreshLocalIp()
         relayServer.start(port)
-        if (_currentMode.value == AppMode.TX) {
+        // Only start audio capture on TX if USB audio hardware is connected or explicit client connected
+        if (_currentMode.value == AppMode.TX && isUsbAudioConnected.value) {
             audioCaptureEngine.start()
         } else {
             audioCaptureEngine.stop()

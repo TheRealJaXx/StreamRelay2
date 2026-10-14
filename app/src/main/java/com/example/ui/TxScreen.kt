@@ -46,6 +46,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -100,6 +102,8 @@ fun TxScreen(
     val isLocalAudioEnabled by viewModel.isLocalAudioEnabled.collectAsStateWithLifecycle()
     val isUsbAudioConnected by viewModel.isUsbAudioConnected.collectAsStateWithLifecycle()
     val activeAudioDeviceName by viewModel.activeAudioDeviceName.collectAsStateWithLifecycle()
+    val selectedPreset by viewModel.selectedPreset.collectAsStateWithLifecycle()
+    val isLocalPreviewEnabled by viewModel.isLocalPreviewEnabled.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -160,6 +164,19 @@ fun TxScreen(
                     isServerActive = isServerActive,
                     connectedClients = connectedClients,
                     onEditPort = { showPortDialog = true }
+                )
+            }
+
+            // Live Transmitter Preview Monitor Card (Side-by-side verification & 720p30 / 720p60 profile selection)
+            item {
+                TxPreviewMonitorCard(
+                    isLocalPreviewEnabled = isLocalPreviewEnabled,
+                    selectedPreset = selectedPreset,
+                    telemetry = telemetry,
+                    onTogglePreview = { viewModel.setLocalPreviewEnabled(it) },
+                    onSelectPreset = { viewModel.selectPreset(it) },
+                    availablePresets = viewModel.availablePresets,
+                    onSurfaceHolderCreated = { viewModel.setLocalPreviewHolder(it) }
                 )
             }
 

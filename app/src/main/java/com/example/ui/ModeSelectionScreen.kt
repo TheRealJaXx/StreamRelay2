@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -111,6 +112,15 @@ fun ModeSelectionScreen(
                     iconTint = Color(0xFFF59E0B),
                     testTag = "latency_test_button",
                     onClick = { onSelectMode(AppMode.TEST_TX) }
+                )
+
+                // Round Trip option (Side-by-side Outgoing vs Incoming)
+                SimpleModeCard(
+                    title = "Round Trip",
+                    icon = Icons.Default.Sync,
+                    iconTint = Color(0xFF38BDF8),
+                    testTag = "round_trip_button",
+                    onClick = { onSelectMode(AppMode.ROUND_TRIP) }
                 )
             }
         }

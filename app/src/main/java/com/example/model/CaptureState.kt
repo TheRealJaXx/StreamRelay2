@@ -24,7 +24,8 @@ data class StreamPreset(
     val label: String,
     val width: Int,
     val height: Int,
-    val description: String
+    val description: String,
+    val targetFps: Int = 60
 )
 
 data class CaptureTelemetry(
