@@ -469,7 +469,7 @@ fun RxScreen(
  * drawing received video frames directly in < 0.5ms with 0 Compose recomposition overhead.
  */
 @Composable
-private fun RxVideoFeed(
+internal fun RxVideoFeed(
     viewModel: CaptureViewModel,
     connectionState: RxConnectionState,
     statusDetail: String,

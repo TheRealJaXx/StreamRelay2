@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.rememberScrollState
@@ -831,6 +832,165 @@ private fun TxRelayDiagnosticsCard(
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TxPreviewMonitorCard(
+    isLocalPreviewEnabled: Boolean,
+    selectedPreset: com.example.model.StreamPreset,
+    telemetry: com.example.model.CaptureTelemetry,
+    onTogglePreview: (Boolean) -> Unit,
+    onSelectPreset: (com.example.model.StreamPreset) -> Unit,
+    availablePresets: List<com.example.model.StreamPreset>,
+    onSurfaceHolderCreated: (SurfaceHolder?) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.5.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // Header with toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = if (isLocalPreviewEnabled) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                        contentDescription = null,
+                        tint = if (isLocalPreviewEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                    )
+                    Column {
+                        Text(
+                            text = "Transmitter Preview Monitor",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = if (isLocalPreviewEnabled) "Live hardware monitor active" else "Preview paused (transmitting in background)",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Switch(
+                    checked = isLocalPreviewEnabled,
+                    onCheckedChange = onTogglePreview,
+                    modifier = Modifier.testTag("tx_preview_switch")
+                )
+            }
+
+            // Stream Resolution & FPS Presets (Select 720p30 vs 720p60)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Profile:",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+
+                FilterChip(
+                    selected = selectedPreset.id == "mjpeg_720p_30",
+                    onClick = {
+                        val p = availablePresets.firstOrNull { it.id == "mjpeg_720p_30" }
+                        if (p != null) onSelectPreset(p)
+                    },
+                    label = { Text("720p30") },
+                    modifier = Modifier.testTag("preset_720p30_chip"),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Color(0xFF10B981).copy(alpha = 0.2f),
+                        selectedLabelColor = Color(0xFF10B981)
+                    )
+                )
+
+                FilterChip(
+                    selected = selectedPreset.id == "mjpeg_720p_60",
+                    onClick = {
+                        val p = availablePresets.firstOrNull { it.id == "mjpeg_720p_60" }
+                        if (p != null) onSelectPreset(p)
+                    },
+                    label = { Text("720p60") },
+                    modifier = Modifier.testTag("preset_720p60_chip"),
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                    )
+                )
+
+                FilterChip(
+                    selected = selectedPreset.id == "mjpeg_1080p_30",
+                    onClick = {
+                        val p = availablePresets.firstOrNull { it.id == "mjpeg_1080p_30" }
+                        if (p != null) onSelectPreset(p)
+                    },
+                    label = { Text("1080p30") },
+                    modifier = Modifier.testTag("preset_1080p30_chip")
+                )
+            }
+
+            // Video Preview Viewport
+            if (isLocalPreviewEnabled) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.Black),
+                    contentAlignment = Alignment.Center
+                ) {
+                    AndroidView(
+                        factory = { ctx ->
+                            SurfaceView(ctx).apply {
+                                holder.addCallback(object : SurfaceHolder.Callback {
+                                    override fun surfaceCreated(h: SurfaceHolder) {
+                                        onSurfaceHolderCreated(h)
+                                    }
+                                    override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {
+                                        onSurfaceHolderCreated(h)
+                                    }
+                                    override fun surfaceDestroyed(h: SurfaceHolder) {
+                                        onSurfaceHolderCreated(null)
+                                    }
+                                })
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    // Minimal status overlay in corner
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(8.dp),
+                        shape = RoundedCornerShape(6.dp),
+                        color = Color.Black.copy(alpha = 0.65f)
+                    ) {
+                        Text(
+                            text = "${if (telemetry.isStreaming) telemetry.fps else 0f} fps · ${selectedPreset.label}",
+                            color = Color.White,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
             }
         }

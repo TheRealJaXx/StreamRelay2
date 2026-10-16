@@ -21,6 +21,7 @@ import com.example.ui.AppMode
 import com.example.ui.CaptureViewModel
 import com.example.ui.LatencyTestScreen
 import com.example.ui.ModeSelectionScreen
+import com.example.ui.RoundTripScreen
 import com.example.ui.RxScreen
 import com.example.ui.TxScreen
 import com.example.ui.theme.MyApplicationTheme

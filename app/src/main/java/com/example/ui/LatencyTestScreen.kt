@@ -317,7 +317,7 @@ fun LatencyTestScreen(
  * completely bypassing Compose recomposition and delivering a silky smooth 60 FPS.
  */
 @Composable
-private fun TestSurfaceFeed(
+internal fun TestSurfaceFeed(
     viewModel: CaptureViewModel,
     modifier: Modifier = Modifier
 ) {
