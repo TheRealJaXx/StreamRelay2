@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
         }
 
         LaunchedEffect(currentMode) {
-          if (currentMode == AppMode.TX) {
+          if (currentMode == AppMode.TX || currentMode == AppMode.ROUND_TRIP) {
             val cameraGranted = ContextCompat.checkSelfPermission(
               this@MainActivity,
               Manifest.permission.CAMERA

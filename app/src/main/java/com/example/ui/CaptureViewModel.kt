@@ -62,6 +62,10 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     private val _roundTripSource = MutableStateFlow(RoundTripSource.TEST_PATTERN)
     val roundTripSource: StateFlow<RoundTripSource> = _roundTripSource.asStateFlow()
 
+    // Selected USB device for capture
+    private val _selectedUsbDeviceId = MutableStateFlow<String?>(null)
+    val selectedUsbDeviceId: StateFlow<String?> = _selectedUsbDeviceId.asStateFlow()
+
     // TX network settings
     private val _localIp = MutableStateFlow(NetworkUtils.getLocalIpAddress())
     val localIp: StateFlow<String> = _localIp.asStateFlow()
@@ -183,14 +187,26 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
             relayServer.submitAudio(pcmBytes)
         }
 
-        // Auto-start capture when device connects/permission granted in TX mode
+        // Auto-start capture when device connects/permission granted in TX or ROUND_TRIP mode
         viewModelScope.launch {
             usbMonitor.connectedDevices.collect { devices ->
-                if (_currentMode.value == AppMode.TX && !telemetry.value.isStreaming) {
-                    val readyDevice = devices.firstOrNull { it.hasPermission && it.isUvcVideo }
-                        ?: devices.firstOrNull { it.hasPermission }
-                    if (readyDevice != null) {
-                        startCapture()
+                val isTx = _currentMode.value == AppMode.TX
+                val isRoundTripCapture = _currentMode.value == AppMode.ROUND_TRIP && _roundTripSource.value == RoundTripSource.HDMI_CAPTURE
+                if ((isTx || isRoundTripCapture) && !telemetry.value.isStreaming) {
+                    val active = getActiveUsbDeviceInfo()
+                    if (active != null && active.hasPermission) {
+                        val raw = usbMonitor.getRawDevice(active.vendorId, active.productId)
+                        if (raw != null) {
+                            startCapture(raw)
+                        } else {
+                            startCapture()
+                        }
+                    } else {
+                        val readyDevice = devices.firstOrNull { it.hasPermission && it.isUvcVideo }
+                            ?: devices.firstOrNull { it.hasPermission }
+                        if (readyDevice != null) {
+                            startCapture()
+                        }
                     }
                 }
             }
@@ -432,14 +448,49 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         uvcCaptureEngine.setStreamPreset(preset)
     }
 
-    fun startCapture() {
-        val uvcInfo = connectedUsbDevices.value.firstOrNull { it.isUvcVideo } ?: connectedUsbDevices.value.firstOrNull()
-        val uvcDevice = usbMonitor.getFirstUvcDevice()
+    fun getActiveUsbDeviceInfo(): UsbDeviceInfo? {
+        val selectedId = _selectedUsbDeviceId.value
+        val list = connectedUsbDevices.value
+        return if (selectedId != null) {
+            list.firstOrNull { it.deviceName == selectedId } ?: list.firstOrNull { it.isUvcVideo } ?: list.firstOrNull()
+        } else {
+            list.firstOrNull { it.isUvcVideo } ?: list.firstOrNull()
+        }
+    }
+
+    fun selectUsbDevice(deviceId: String?) {
+        _selectedUsbDeviceId.value = deviceId
+        val isTx = _currentMode.value == AppMode.TX
+        val isRoundTripCapture = _currentMode.value == AppMode.ROUND_TRIP && _roundTripSource.value == RoundTripSource.HDMI_CAPTURE
+        if (isTx || isRoundTripCapture) {
+            val active = getActiveUsbDeviceInfo()
+            if (active != null && active.hasPermission) {
+                val raw = usbMonitor.getRawDevice(active.vendorId, active.productId)
+                if (raw != null) {
+                    uvcCaptureEngine.stopCapture()
+                    uvcCaptureEngine.startCapture(raw)
+                }
+            }
+        }
+    }
+
+    fun startCapture(specificDevice: android.hardware.usb.UsbDevice? = null) {
+        val activeInfo = getActiveUsbDeviceInfo()
+        val uvcDevice = specificDevice ?: run {
+            if (activeInfo != null) {
+                usbMonitor.getRawDevice(activeInfo.vendorId, activeInfo.productId)
+            } else {
+                usbMonitor.getFirstUvcDevice()
+            }
+        }
         if (uvcDevice != null) {
-            if (uvcInfo?.hasPermission == true) {
+            val matchingInfo = connectedUsbDevices.value.firstOrNull {
+                it.vendorId == uvcDevice.vendorId && it.productId == uvcDevice.productId
+            } ?: activeInfo
+            if (matchingInfo?.hasPermission == true) {
                 uvcCaptureEngine.startCapture(uvcDevice)
             } else {
-                val name = uvcInfo?.displayName ?: uvcDevice.productName ?: "USB Video"
+                val name = matchingInfo?.displayName ?: uvcDevice.productName ?: "USB Video"
                 addLog("TX", "Capture card detected ($name). Waiting for USB permission...", false)
             }
         } else {
