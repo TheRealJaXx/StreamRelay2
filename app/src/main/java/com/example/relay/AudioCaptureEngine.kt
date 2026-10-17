@@ -288,10 +288,10 @@ class AudioCaptureEngine(
 
     private fun initAudioRecord(sampleRate: Int, bufferSize: Int, usbDevice: AudioDeviceInfo?): AudioRecord? {
         val audioSources = intArrayOf(
+            MediaRecorder.AudioSource.UNPROCESSED,
             MediaRecorder.AudioSource.MIC,
             MediaRecorder.AudioSource.DEFAULT,
-            MediaRecorder.AudioSource.CAMCORDER,
-            MediaRecorder.AudioSource.UNPROCESSED
+            MediaRecorder.AudioSource.CAMCORDER
         )
 
         for (source in audioSources) {

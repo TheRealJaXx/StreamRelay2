@@ -62,6 +62,14 @@ class MainActivity : ComponentActivity() {
             if (!cameraGranted) needPermissions.add(Manifest.permission.CAMERA)
             if (!audioGranted) needPermissions.add(Manifest.permission.RECORD_AUDIO)
 
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+              val notifGranted = ContextCompat.checkSelfPermission(
+                this@MainActivity,
+                Manifest.permission.POST_NOTIFICATIONS
+              ) == PackageManager.PERMISSION_GRANTED
+              if (!notifGranted) needPermissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            }
+
             if (needPermissions.isNotEmpty()) {
               multiplePermissionLauncher.launch(needPermissions.toTypedArray())
             }

@@ -12,6 +12,7 @@ import com.example.model.StreamPreset
 import com.example.model.UsbDeviceInfo
 import com.example.relay.AudioCaptureEngine
 import com.example.relay.JpegUtils
+import com.example.relay.AudioLatencyProfile
 import com.example.relay.NetworkUtils
 import com.example.relay.OffscreenDrainer
 import com.example.relay.RelayClient
@@ -100,8 +101,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         addLog(tag, message, isError)
     }
 
-    // Unified TCP Relay Server (TX) - Sends Video and Audio multiplexed over single port
-    val relayServer = RelayServer { tag, message, isError ->
+    // Unified TCP Relay Server (TX) - Sends Video and Audio multiplexed over separate ports
+    val relayServer = RelayServer(application) { tag, message, isError ->
         addLog(tag, message, isError)
     }
 
@@ -121,6 +122,16 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val activeAudioDeviceName: StateFlow<String> = audioCaptureEngine.activeDeviceName
     val isAudioPlaying: StateFlow<Boolean> = relayClient.isAudioPlaying
     val isRxMuted: StateFlow<Boolean> = relayClient.isMuted
+    val audioLatencyProfile: StateFlow<AudioLatencyProfile> = relayClient.audioLatencyProfile
+    val audioDelayMs: StateFlow<Int> = relayClient.audioDelayMs
+
+    fun setAudioLatencyProfile(profile: AudioLatencyProfile) {
+        relayClient.setAudioLatencyProfile(profile)
+    }
+
+    fun setAudioDelayMs(delayMs: Int) {
+        relayClient.setAudioDelayMs(delayMs)
+    }
 
     val connectedUsbDevices: StateFlow<List<UsbDeviceInfo>> = usbMonitor.connectedDevices
     val telemetry: StateFlow<CaptureTelemetry> = uvcCaptureEngine.telemetry
@@ -162,24 +173,25 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     init {
         addLog("System", "Stream Relay initialized (Separate Video & Audio Sockets)", false)
 
-        // Wire camera frames directly from UVC engine into TCP server
-        uvcCaptureEngine.onRawFrameCaptured = { rawBytes ->
+        // Wire camera frames directly from UVC engine into TCP server using pooled buffers
+        uvcCaptureEngine.onRawFrameCapturedWithRelease = { rawBytes, sizeBytes, releaseAction ->
             relayServer.recordFrameCaptured()
 
-            val frameToSend = if (JpegUtils.isJpeg(rawBytes)) {
-                val endsEoi = rawBytes.size >= 2 &&
-                    (rawBytes[rawBytes.size - 2].toInt() and 0xFF) == 0xFF &&
-                    (rawBytes[rawBytes.size - 1].toInt() and 0xFF) == 0xD9
-                if (endsEoi) rawBytes else JpegUtils.extractCleanJpeg(rawBytes)
+            val isJpeg = sizeBytes >= 2 &&
+                (rawBytes[0].toInt() and 0xFF) == 0xFF && (rawBytes[1].toInt() and 0xFF) == 0xD8
+
+            if (isJpeg) {
+                relayServer.submitFrame(rawBytes, sizeBytes, releaseAction)
             } else {
-                // Buffer is uncompressed YUY2/NV21 from UVC camera (e.g. 1.84MB for 720p).
-                // Compress to compact JPEG (approx 70-100KB) for low latency and smooth 60fps streaming.
                 val telem = telemetry.value
                 val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
                 val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
-                JpegUtils.compressYuvToJpeg(rawBytes, w, h, quality = 80) ?: rawBytes
+                val compressed = JpegUtils.compressYuvToJpeg(rawBytes.copyOf(sizeBytes), w, h, quality = 80)
+                releaseAction()
+                if (compressed != null) {
+                    relayServer.submitFrame(compressed, compressed.size)
+                }
             }
-            relayServer.submitFrame(frameToSend)
         }
 
         // Wire raw PCM audio chunks directly from Audio engine into Audio TCP server
@@ -213,10 +225,14 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun ensureOffscreenSurface(): Surface {
+    private fun ensureOffscreenSurface(
+        width: Int = _selectedPreset.value.width,
+        height: Int = _selectedPreset.value.height
+    ): Surface {
         var drainer = offscreenDrainer
-        if (drainer == null) {
-            drainer = OffscreenDrainer(1280, 720)
+        if (drainer == null || drainer.width != width || drainer.height != height) {
+            try { drainer?.release() } catch (_: Exception) {}
+            drainer = OffscreenDrainer(width, height)
             offscreenDrainer = drainer
         }
         return drainer.surface

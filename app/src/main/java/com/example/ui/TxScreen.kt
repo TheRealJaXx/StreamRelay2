@@ -465,16 +465,23 @@ private fun TxTelemetryCard(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // 3-tile telemetry summary
+            // 4-tile telemetry summary showing requested, negotiated, and measured FPS
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 MetricTile(
-                    label = "Capture FPS",
+                    label = "Measured FPS",
                     value = if (telemetry.isStreaming) "${telemetry.fps}" else "0.0",
                     unit = "fps",
                     highlight = telemetry.isStreaming && telemetry.fps > 0f,
+                    modifier = Modifier.weight(1f)
+                )
+                MetricTile(
+                    label = "FPS (Req/Neg)",
+                    value = "${telemetry.requestedFps}/${telemetry.negotiatedFps}",
+                    unit = "fps",
+                    highlight = telemetry.negotiatedFps >= telemetry.requestedFps,
                     modifier = Modifier.weight(1f)
                 )
                 MetricTile(
@@ -491,6 +498,22 @@ private fun TxTelemetryCard(
                     highlight = telemetry.lastFrameSizeBytes > 0,
                     modifier = Modifier.weight(1f)
                 )
+            }
+
+            if (telemetry.fpsNotice != null) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Surface(
+                    color = Color(0xFFF59E0B).copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(8.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFF59E0B).copy(alpha = 0.5f))
+                ) {
+                    Text(
+                        text = "Notice: ${telemetry.fpsNotice}",
+                        color = Color(0xFFF59E0B),
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
             }
 
             if (usbDevice != null && !usbDevice.hasPermission) {

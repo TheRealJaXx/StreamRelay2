@@ -12,7 +12,7 @@ import android.view.Surface
  * This guarantees the camera producer buffer queue never fills up or stalls when
  * the on-screen preview is disabled.
  */
-class OffscreenDrainer(width: Int = 1280, height: Int = 720) {
+class OffscreenDrainer(val width: Int = 1280, val height: Int = 720) {
     private val handlerThread = HandlerThread("UvcOffscreenDrainer").apply { start() }
     private val handler = Handler(handlerThread.looper)
     private var imageReader: ImageReader? = null

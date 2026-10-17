@@ -1,14 +1,16 @@
 package com.example.ui
 
 import android.app.Activity
+import android.content.Context
+import android.net.wifi.WifiManager
+import android.os.Build
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -37,11 +39,14 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,17 +60,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.BuildConfig
+import com.example.relay.AudioLatencyProfile
 import com.example.relay.RxConnectionState
 import kotlinx.coroutines.delay
 
@@ -83,6 +90,8 @@ fun RxScreen(
     val targetPort by viewModel.rxTargetPort.collectAsStateWithLifecycle()
     val isAudioPlaying by viewModel.isAudioPlaying.collectAsStateWithLifecycle()
     val isRxMuted by viewModel.isRxMuted.collectAsStateWithLifecycle()
+    val audioProfile by viewModel.audioLatencyProfile.collectAsStateWithLifecycle()
+    val audioDelayMs by viewModel.audioDelayMs.collectAsStateWithLifecycle()
 
     var inputIp by remember(targetIp) { mutableStateOf(targetIp) }
     var inputPort by remember(targetPort) { mutableStateOf(targetPort.toString()) }
@@ -98,12 +107,46 @@ fun RxScreen(
         }
     }
 
-    // Keep screen on while in RX mode
+    // Presentation requirements: Immersive sticky, cutout mode SHORT_EDGES, keep screen on, low latency Wi-Fi Lock
     DisposableEffect(Unit) {
         val window = (context as? Activity)?.window
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // API 28+ Display Cutout SHORT_EDGES
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window?.attributes?.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        }
+
+        // Immersive sticky (transient on swipe)
+        if (window != null) {
+            val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+            insetsController.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        }
+
+        // Low latency Wi-Fi Lock while RxScreen is visible
+        val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        val wifiMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+        } else {
+            WifiManager.WIFI_MODE_FULL_HIGH_PERF
+        }
+        val wifiLock = wm?.createWifiLock(wifiMode, "StreamRelay:RxWifiLock")?.apply {
+            setReferenceCounted(false)
+            try { acquire() } catch (_: Exception) {}
+        }
+
         onDispose {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (window != null) {
+                val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+                insetsController.show(WindowInsetsCompat.Type.systemBars())
+            }
+            try {
+                if (wifiLock?.isHeld == true) wifiLock.release()
+            } catch (_: Exception) {}
         }
     }
 
@@ -118,9 +161,7 @@ fun RxScreen(
                 showOverlay = !showOverlay
             }
     ) {
-        // 1. ISOLATED VIDEO VIEWPORT:
-        // Reads viewModel.rxBitmap in its own isolated Composable scope so 60 FPS frame emissions
-        // never trigger recomposition of the parent RxScreen, overlay, or control cards!
+        // 1. ISOLATED VIDEO VIEWPORT: Direct SurfaceView rendering with zero recomposition
         RxVideoFeed(
             viewModel = viewModel,
             connectionState = connectionState,
@@ -129,7 +170,7 @@ fun RxScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Animated UI Overlay (Top and Bottom Controls)
+        // 2. Animated UI Overlay (Top header, Diagnostics, and Bottom Controls)
         AnimatedVisibility(
             visible = showOverlay,
             enter = fadeIn(),
@@ -142,7 +183,7 @@ fun RxScreen(
                     .background(Color.Black.copy(alpha = 0.45f))
                     .padding(16.dp)
             ) {
-                // Top Header & Stats
+                // Top Header
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -213,21 +254,21 @@ fun RxScreen(
                     }
                 }
 
-                // Diagnostics Panel (visible in the RX stats panel)
+                // Diagnostics Panel (FPS, Decode avg/max, Frame age, RTT avg/p95, Dropped, Audio)
                 if (connectionState != RxConnectionState.DISCONNECTED || stats.videoPacketsReceived > 0L) {
                     Surface(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(top = 64.dp),
                         shape = RoundedCornerShape(12.dp),
-                        color = Color(0xFF0F172A).copy(alpha = 0.90f),
+                        color = Color(0xFF0F172A).copy(alpha = 0.92f),
                         border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
                     ) {
                         Column(
                             modifier = Modifier.padding(10.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            // Line 1: Primary FPS & Audio Status
+                            // Line 1: Primary FPS & Latencies
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Text(
                                     text = "FPS: ${stats.fps}",
@@ -237,34 +278,44 @@ fun RxScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "Decode: ${stats.decodeTimeMs}ms",
+                                    text = "Decode: ${stats.decodeTimeMsAvg}ms (max: ${stats.decodeTimeMsMax}ms)",
                                     color = Color(0xFFA7F3D0),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
                                 )
                                 Text(
-                                    text = "Frame: ${stats.frameSizeBytes / 1024}KB",
+                                    text = "Age: ${stats.frameAgeMs}ms",
                                     color = Color(0xFFFDE68A),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
                                 )
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .clickable { viewModel.setRxMuted(!isRxMuted) }
-                                ) {
-                                    Text(
-                                        text = if (isRxMuted) "Audio: MUTED" else if (isAudioPlaying) "Audio: LIVE" else "Audio: Wait",
-                                        color = if (isRxMuted) Color(0xFFF87171) else if (isAudioPlaying) Color(0xFF34D399) else Color(0xFF94A3B8),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
                             }
 
-                            // Line 2: Packet Counters & Throughput
+                            // Line 2: Real Network RTT (Probe port P+2) & Interval
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text(
+                                    text = "RTT: ${stats.rttAvgMs}ms (p95: ${stats.rttP95Ms}ms)",
+                                    color = Color(0xFF34D399),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "Arrival p95: ${stats.arrivalIntervalP95Ms}ms",
+                                    color = Color(0xFFCBD5E1),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                                Text(
+                                    text = "Dropped: ${stats.droppedFrames}",
+                                    color = if (stats.droppedFrames > 0) Color(0xFFF87171) else Color(0xFF94A3B8),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+
+                            // Line 3: Packet Counters & Throughput
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Text(
                                     text = "Video Pkts: ${stats.videoPacketsReceived}",
@@ -285,15 +336,29 @@ fun RxScreen(
                                     fontFamily = FontFamily.Monospace
                                 )
                                 Text(
-                                    text = "Last: ${if (stats.secondsSinceLastVideoPacket >= 0) "${stats.secondsSinceLastVideoPacket}s" else "--"}",
-                                    color = if (stats.secondsSinceLastVideoPacket > 2f) Color(0xFFF87171) else Color(0xFF94A3B8),
+                                    text = "Underruns: ${stats.audioUnderrunCount}",
+                                    color = if (stats.audioUnderrunCount > 0) Color(0xFFF59E0B) else Color(0xFF94A3B8),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
                                 )
                             }
 
-                            // Line 3: Frame Structure Validation
+                            // Line 4: Audio Mute & Structure
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .clickable { viewModel.setRxMuted(!isRxMuted) }
+                                ) {
+                                    Text(
+                                        text = if (isRxMuted) "Audio: MUTED" else if (isAudioPlaying) "Audio: LIVE" else "Audio: Wait",
+                                        color = if (isRxMuted) Color(0xFFF87171) else if (isAudioPlaying) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                                 Text(
                                     text = "Head: [${stats.lastFrameFirst4BytesHex}]",
                                     color = Color(0xFFCBD5E1),
@@ -301,49 +366,18 @@ fun RxScreen(
                                     fontFamily = FontFamily.Monospace
                                 )
                                 Text(
-                                    text = "Ends FF D9: ${if (stats.lastFrameEndsEoi) "YES" else "NO"}",
-                                    color = if (stats.lastFrameEndsEoi) Color(0xFF34D399) else Color(0xFFF87171),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "Bmp: ${stats.decodedBitmapSize}",
+                                    text = "Res: ${stats.decodedBitmapSize}",
                                     color = Color(0xFF38BDF8),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
                                 )
                             }
 
-                            // Line 4: Decode Success & Failures
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Text(
-                                    text = "Decode OK: ${stats.decodeSuccesses}",
-                                    color = Color(0xFF34D399),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                Text(
-                                    text = "Fail: ${stats.decodeFailures}",
-                                    color = if (stats.decodeFailures > 0) Color(0xFFF87171) else Color(0xFF94A3B8),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                if (stats.lastDecodeError != "None") {
-                                    Text(
-                                        text = "Err: ${stats.lastDecodeError}",
-                                        color = Color(0xFFF87171),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                }
-                            }
-
-                            // Line 5: Status detail message if warning/error/info
+                            // Line 5: Status detail
                             if (stats.statusDetail.isNotBlank() && stats.statusDetail != "Connected") {
                                 Text(
                                     text = "Status: ${stats.statusDetail}",
-                                    color = if (stats.statusDetail.startsWith("ERROR") || stats.statusDetail.contains("refused") || stats.statusDetail.contains("timed out")) Color(0xFFF87171) else Color(0xFF94A3B8),
+                                    color = if (stats.statusDetail.contains("refused") || stats.statusDetail.contains("timed out") || stats.statusDetail.contains("mismatch")) Color(0xFFF87171) else Color(0xFF94A3B8),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
                                     maxLines = 2
@@ -353,7 +387,7 @@ fun RxScreen(
                     }
                 }
 
-                // Bottom Control Card (IP, Port & Connect)
+                // Bottom Control Card (IP, Port, Audio profile, Audio delay, Connect/Disconnect)
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -364,15 +398,17 @@ fun RxScreen(
                         ) {},
                     shape = RoundedCornerShape(20.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = Color(0xFF0F172A).copy(alpha = 0.92f)
+                        containerColor = Color(0xFF0F172A).copy(alpha = 0.94f)
                     ),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF334155))
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp)
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        // IP & Port Fields
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -408,31 +444,58 @@ fun RxScreen(
                             )
                         }
 
-                        // Detailed Status Notice (Distinguishes timeout, connection refused, watchdog)
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = stats.statusDetail,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = when {
-                                stats.statusDetail.contains("timed out", ignoreCase = true) -> Color(0xFFF87171)
-                                stats.statusDetail.contains("refused", ignoreCase = true) -> Color(0xFFF87171)
-                                stats.statusDetail.contains("failed", ignoreCase = true) -> Color(0xFFF87171)
-                                stats.statusDetail.contains("no data received", ignoreCase = true) -> Color(0xFFFBBF24)
-                                stats.statusDetail.contains("Connected", ignoreCase = true) -> Color(0xFF34D399)
-                                else -> Color(0xFF94A3B8)
-                            },
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Medium
-                        )
+                        // Audio Latency Profile Selector (Task 7)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Audio Profile:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8),
+                                fontWeight = FontWeight.Bold
+                            )
+                            AudioLatencyProfile.entries.forEach { profile ->
+                                FilterChip(
+                                    selected = audioProfile == profile,
+                                    onClick = { viewModel.setAudioLatencyProfile(profile) },
+                                    label = { Text(profile.label, style = MaterialTheme.typography.labelSmall) },
+                                    colors = FilterChipDefaults.filterChipColors(
+                                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
+                                        selectedLabelColor = MaterialTheme.colorScheme.primary
+                                    )
+                                )
+                            }
+                        }
 
-                        Spacer(modifier = Modifier.height(10.dp))
+                        // Audio Delay Slider (0 to 200 ms) (Task 7)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Audio Delay: ${audioDelayMs}ms",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF94A3B8),
+                                modifier = Modifier.width(115.dp)
+                            )
+                            Slider(
+                                value = audioDelayMs.toFloat(),
+                                onValueChange = { viewModel.setAudioDelayMs(it.toInt()) },
+                                valueRange = 0f..200f,
+                                steps = 19,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
 
+                        // Connect / Disconnect Action Button
                         if (connectionState == RxConnectionState.CONNECTED || connectionState == RxConnectionState.CONNECTING || connectionState == RxConnectionState.RECONNECTING) {
                             Button(
                                 onClick = { viewModel.disconnectRx() },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(48.dp),
+                                    .height(44.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                             ) {
                                 Icon(imageVector = Icons.Default.Stop, contentDescription = null)
@@ -448,7 +511,7 @@ fun RxScreen(
                                 },
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .height(48.dp)
+                                    .height(44.dp)
                                     .testTag("connect_rx_button")
                             ) {
                                 Icon(imageVector = Icons.Default.PlayArrow, contentDescription = null)
@@ -465,8 +528,8 @@ fun RxScreen(
 
 /**
  * Direct Hardware-Accelerated Video Rendering Composable.
- * Uses a native SurfaceView with direct hardware canvas lock/unlock,
- * drawing received video frames directly in < 0.5ms with 0 Compose recomposition overhead.
+ * Uses a native SurfaceView with direct hardware canvas lock/unlock via MjpegPlayer.
+ * Synchronizes display refresh rate on API 30+ to eliminate judder on 90/120 Hz displays.
  */
 @Composable
 internal fun RxVideoFeed(
@@ -476,25 +539,31 @@ internal fun RxVideoFeed(
     videoPacketsReceived: Long,
     modifier: Modifier = Modifier
 ) {
-    val bitmap by viewModel.rxBitmap.collectAsStateWithLifecycle()
     val isReceiving = connectionState == RxConnectionState.CONNECTED && videoPacketsReceived > 0L
 
-    Box(
-        modifier = modifier,
-        contentAlignment = Alignment.Center
-    ) {
-        // Direct Hardware-Accelerated Native SurfaceView (< 0.5ms draw latency)
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
         AndroidView(
-            factory = { context ->
-                SurfaceView(context).apply {
+            factory = { ctx ->
+                SurfaceView(ctx).apply {
                     isClickable = false
                     isFocusable = false
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                try {
+                                    holder.surface.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                                } catch (_: Exception) {}
+                            }
                             viewModel.attachRxSurface(holder)
                         }
 
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                try {
+                                    holder.surface.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+                                } catch (_: Exception) {}
+                            }
+                        }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) {
                             viewModel.detachRxSurface(holder)
@@ -504,17 +573,6 @@ internal fun RxVideoFeed(
             },
             modifier = Modifier.fillMaxSize()
         )
-
-        // Fallback Compose Image if surface drawing isn't active or for snapshot compatibility
-        if (bitmap != null && !isReceiving) {
-            Image(
-                bitmap = remember(bitmap) { bitmap!!.asImageBitmap() },
-                contentDescription = "Relayed Video Feed",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Fit,
-                filterQuality = FilterQuality.Medium
-            )
-        }
 
         // Idle placeholder when disconnected or waiting for first frame
         if (!isReceiving) {

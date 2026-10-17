@@ -17,7 +17,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -26,7 +29,10 @@ import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Usb
 import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -50,9 +56,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.model.CaptureTelemetry
+import com.example.model.UsbDeviceInfo
 import com.example.relay.RxConnectionState
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -69,6 +78,8 @@ fun RoundTripScreen(
     val rxStats by viewModel.rxStats.collectAsStateWithLifecycle()
     val txStats by viewModel.txStats.collectAsStateWithLifecycle()
     val telemetry by viewModel.telemetry.collectAsStateWithLifecycle()
+    val connectedUsbDevices by viewModel.connectedUsbDevices.collectAsStateWithLifecycle()
+    val selectedUsbDeviceId by viewModel.selectedUsbDeviceId.collectAsStateWithLifecycle()
 
     // Ensure RX surface and local preview surfaces are cleaned up on exit
     DisposableEffect(Unit) {
@@ -84,12 +95,12 @@ fun RoundTripScreen(
                 title = {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "Round Trip Latency Test",
+                            text = "Loopback (127.0.0.1): excludes Wi-Fi",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "Side-by-Side: Outgoing (TX) vs Incoming (RX)",
+                            text = "Side-by-Side: Outgoing (TX) vs Incoming (RX) · Internal Pipeline",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -243,6 +254,9 @@ fun RoundTripScreen(
                             viewModel = viewModel,
                             roundTripSource = roundTripSource,
                             testFps = testFps,
+                            connectedUsbDevices = connectedUsbDevices,
+                            selectedUsbDeviceId = selectedUsbDeviceId,
+                            telemetry = telemetry,
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
@@ -268,6 +282,9 @@ fun RoundTripScreen(
                             viewModel = viewModel,
                             roundTripSource = roundTripSource,
                             testFps = testFps,
+                            connectedUsbDevices = connectedUsbDevices,
+                            selectedUsbDeviceId = selectedUsbDeviceId,
+                            telemetry = telemetry,
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth()
@@ -293,6 +310,9 @@ private fun OutgoingFeedCard(
     viewModel: CaptureViewModel,
     roundTripSource: RoundTripSource,
     testFps: Int,
+    connectedUsbDevices: List<UsbDeviceInfo>,
+    selectedUsbDeviceId: String?,
+    telemetry: CaptureTelemetry,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -346,6 +366,151 @@ private fun OutgoingFeedCard(
                 }
             }
 
+            // USB Capture Card Selector Bar (when HDMI_CAPTURE is selected)
+            if (roundTripSource == RoundTripSource.HDMI_CAPTURE) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF1E293B).copy(alpha = 0.7f),
+                    border = BorderStroke(1.dp, Color(0xFF334155))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        if (connectedUsbDevices.isEmpty()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Cable,
+                                        contentDescription = null,
+                                        tint = Color(0xFFF59E0B),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = "No USB Capture Card Detected",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFF59E0B),
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Button(
+                                    onClick = { viewModel.refreshAll() },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                    modifier = Modifier.height(26.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF334155),
+                                        contentColor = Color.White
+                                    )
+                                ) {
+                                    Text("Scan USB", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "Card:",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8),
+                                    fontWeight = FontWeight.Bold
+                                )
+                                connectedUsbDevices.forEach { dev ->
+                                    val isSelected = dev.deviceName == selectedUsbDeviceId ||
+                                        (selectedUsbDeviceId == null && dev == (connectedUsbDevices.firstOrNull { it.isUvcVideo } ?: connectedUsbDevices.firstOrNull()))
+                                    FilterChip(
+                                        selected = isSelected,
+                                        onClick = {
+                                            viewModel.selectUsbDevice(dev.deviceName)
+                                        },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Default.Usb,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(14.dp)
+                                            )
+                                        },
+                                        label = {
+                                            Text(
+                                                "${dev.displayName} (${dev.formattedVidPid})",
+                                                style = MaterialTheme.typography.labelSmall
+                                            )
+                                        },
+                                        colors = FilterChipDefaults.filterChipColors(
+                                            selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.25f),
+                                            selectedLabelColor = Color(0xFF38BDF8)
+                                        )
+                                    )
+                                }
+                            }
+
+                            // Active device status & grant permission row
+                            val activeDev = connectedUsbDevices.firstOrNull { it.deviceName == selectedUsbDeviceId }
+                                ?: connectedUsbDevices.firstOrNull { it.isUvcVideo }
+                                ?: connectedUsbDevices.firstOrNull()
+
+                            if (activeDev != null && !activeDev.hasPermission) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "Permission needed for ${activeDev.displayName}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFFF59E0B)
+                                    )
+                                    Button(
+                                        onClick = { viewModel.requestUsbPermission(activeDev.vendorId, activeDev.productId) },
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.height(26.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7))
+                                    ) {
+                                        Text("Grant Permission", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            } else if (activeDev != null) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "${activeDev.displayName} · Ready",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color(0xFF34D399)
+                                    )
+                                    if (telemetry.isStreaming) {
+                                        Text(
+                                            text = "${telemetry.fps} fps · ${telemetry.resolutionWidth}x${telemetry.resolutionHeight}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = Color(0xFF38BDF8)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Viewport
             Box(
                 modifier = Modifier
@@ -379,6 +544,35 @@ private fun OutgoingFeedCard(
                         },
                         modifier = Modifier.fillMaxSize()
                     )
+
+                    if (!telemetry.isStreaming) {
+                        val activeDev = connectedUsbDevices.firstOrNull { it.deviceName == selectedUsbDeviceId }
+                            ?: connectedUsbDevices.firstOrNull { it.isUvcVideo }
+                            ?: connectedUsbDevices.firstOrNull()
+                        val msg = when {
+                            connectedUsbDevices.isEmpty() -> "No USB Capture Card Detected\nConnect HDMI capture card to test real-world latency"
+                            activeDev != null && !activeDev.hasPermission -> "USB Permission Required\nTap 'Grant Permission' above to start video"
+                            else -> "Initializing USB Capture Stream..."
+                        }
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Cable,
+                                contentDescription = null,
+                                tint = Color(0xFF64748B),
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Text(
+                                text = msg,
+                                color = Color(0xFF94A3B8),
+                                style = MaterialTheme.typography.bodySmall,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
                 }
             }
         }

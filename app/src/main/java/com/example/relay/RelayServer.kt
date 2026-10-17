@@ -1,19 +1,23 @@
 package com.example.relay
 
+import android.content.Context
+import android.net.wifi.WifiManager
+import android.os.Build
+import android.os.PowerManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.IOException
 import java.net.InetSocketAddress
@@ -37,10 +41,20 @@ data class TxRelayStats(
 )
 
 class RelayServer(
+    private val context: Context? = null,
     private val onLog: (tag: String, message: String, isError: Boolean) -> Unit
 ) {
+    companion object {
+        // Video frame header magic (0x53523202: 'S','R','2', 0x02)
+        const val VIDEO_FRAME_MAGIC = 0x53523202.toInt()
+    }
+
     private var videoServerSocket: ServerSocket? = null
     private var audioServerSocket: ServerSocket? = null
+    private var rttServerSocket: ServerSocket? = null
+
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     private val isRunning = AtomicBoolean(false)
     private var serverScope: CoroutineScope? = null
@@ -57,12 +71,19 @@ class RelayServer(
     private val _isServerActive = MutableStateFlow(false)
     val isServerActive: StateFlow<Boolean> = _isServerActive.asStateFlow()
 
+    class VideoFramePayload(
+        val data: ByteArray,
+        val size: Int,
+        val sequenceNumber: Int,
+        val onWritten: (() -> Unit)? = null
+    )
+
     // Internal session holder for video client
     private class VideoClientSession(
         val id: Int,
         val socket: Socket,
         val job: Job,
-        val channel: Channel<ByteArray>
+        val channel: Channel<VideoFramePayload>
     )
 
     // Internal session holder for audio client
@@ -74,6 +95,7 @@ class RelayServer(
     )
 
     private val clientCounter = AtomicInteger(0)
+    private val videoSeqCounter = AtomicInteger(0)
 
     @Volatile
     private var currentVideoSession: VideoClientSession? = null
@@ -85,8 +107,10 @@ class RelayServer(
     private var framesCapturedCount = 0L
     private var framesSubmittedCount = 0L
     private var framesSentCount = 0L
+    private var framesDroppedCount = 0L
     private var audioCapturedCount = 0L
     private var audioSentCount = 0L
+
     private var lastFrameSize = 0
     private var lastStartsSoi = false
     private var lastEndsEoi = false
@@ -102,12 +126,40 @@ class RelayServer(
         isRunning.set(true)
         _isServerActive.value = true
 
-        // Requirement A: serverScope must be CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        // Acquire WakeLock & Low Latency WifiLock while server is running
+        context?.let { ctx ->
+            try {
+                val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "StreamRelay:TxWakeLock")?.apply {
+                    setReferenceCounted(false)
+                    acquire(24 * 60 * 60 * 1000L)
+                }
+            } catch (e: Exception) {
+                onLog("TX-Relay", "WakeLock notice: ${e.message}", false)
+            }
+
+            try {
+                val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                val wifiMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm?.createWifiLock(wifiMode, "StreamRelay:TxWifiLock")?.apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+            } catch (e: Exception) {
+                onLog("TX-Relay", "WifiLock notice: ${e.message}", false)
+            }
+        }
+
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         serverScope = scope
 
         val videoPort = port
         val audioPort = port + 1
+        val rttPort = port + 2
 
         // 1. Video Accept Loop (Port P)
         scope.launch {
@@ -123,10 +175,8 @@ class RelayServer(
                         val client = ss.accept()
                         handleNewVideoClient(client, scope)
                     } catch (e: IOException) {
-                        if (!isRunning.get() || ss.isClosed) {
-                            break
-                        }
-                        onLog("TX-Relay", "Video server accept transient notice: ${e.message}", false)
+                        if (!isRunning.get() || ss.isClosed) break
+                        onLog("TX-Relay", "Video server accept notice: ${e.message}", false)
                     }
                 }
             } catch (e: Exception) {
@@ -150,10 +200,8 @@ class RelayServer(
                         val client = ss.accept()
                         handleNewAudioClient(client, scope)
                     } catch (e: IOException) {
-                        if (!isRunning.get() || ss.isClosed) {
-                            break
-                        }
-                        onLog("TX-Relay", "Audio server accept transient notice: ${e.message}", false)
+                        if (!isRunning.get() || ss.isClosed) break
+                        onLog("TX-Relay", "Audio server accept notice: ${e.message}", false)
                     }
                 }
             } catch (e: Exception) {
@@ -162,25 +210,59 @@ class RelayServer(
                 }
             }
         }
+
+        // 3. RTT Echo Loop (Port P + 2) - Immediately echoes back 8-byte nanoTime
+        scope.launch {
+            try {
+                val ss = ServerSocket()
+                ss.reuseAddress = true
+                ss.bind(InetSocketAddress("0.0.0.0", rttPort))
+                rttServerSocket = ss
+                onLog("TX-Relay", "RTT Echo Server listening on port $rttPort", false)
+
+                while (isRunning.get() && !ss.isClosed) {
+                    try {
+                        val client = ss.accept()
+                        launch {
+                            try {
+                                client.tcpNoDelay = true
+                                val din = DataInputStream(BufferedInputStream(client.getInputStream(), 1024))
+                                val dout = DataOutputStream(BufferedOutputStream(client.getOutputStream(), 1024))
+                                while (isActive && isRunning.get() && !client.isClosed) {
+                                    val t = din.readLong()
+                                    dout.writeLong(t)
+                                    dout.flush()
+                                }
+                            } catch (_: Exception) {}
+                            finally {
+                                try { client.close() } catch (_: Exception) {}
+                            }
+                        }
+                    } catch (e: IOException) {
+                        if (!isRunning.get() || ss.isClosed) break
+                    }
+                }
+            } catch (e: Exception) {
+                if (isRunning.get()) {
+                    onLog("TX-Relay", "RTT server notice on port $rttPort: ${e.message}", false)
+                }
+            }
+        }
     }
 
     private fun handleNewVideoClient(socket: Socket, scope: CoroutineScope) {
         val clientId = clientCounter.incrementAndGet()
         val clientAddress = socket.inetAddress?.hostAddress ?: "Unknown"
-        // Requirement A: Log every accept
         onLog("TX-Relay", "Video client #$clientId accepted from $clientAddress", false)
 
-        // Requirement A: When client is replaced, cancel its Job and close its socket immediately
         currentVideoSession?.let { old ->
             onLog("TX-Relay", "Ending prior video client #${old.id} (replaced by client #$clientId)", false)
             try { old.socket.close() } catch (_: Exception) {}
             old.job.cancel()
         }
 
-        // Requirement B: Video: keep only the newest frame
-        val videoChannel = Channel<ByteArray>(Channel.CONFLATED)
-
-        val ackChannel = Channel<Unit>(Channel.CONFLATED)
+        // CONFLATED hand-off on TX: a writer thread writes newest frame; blocking write is backpressure
+        val videoChannel = Channel<VideoFramePayload>(Channel.CONFLATED)
 
         lateinit var session: VideoClientSession
         val job = scope.launch {
@@ -188,62 +270,45 @@ class RelayServer(
             try {
                 // Low latency TCP configuration
                 socket.tcpNoDelay = true
-                socket.sendBufferSize = 32 * 1024
-                socket.receiveBufferSize = 32 * 1024
+                socket.sendBufferSize = 128 * 1024 // 128 KB SO_SNDBUF
+                socket.receiveBufferSize = 64 * 1024
                 try {
                     socket.setPerformancePreferences(0, 2, 1)
                 } catch (_: Exception) {}
 
-                // Immediate disconnect detector & ACK reader on incoming stream
-                launch {
-                    try {
-                        val input = socket.getInputStream()
-                        val dummy = ByteArray(32)
-                        while (isActive && !socket.isClosed && socket.isConnected) {
-                            val r = input.read(dummy)
-                            if (r == -1) break
-                            if (r > 0) {
-                                // Client acknowledged frame received - ready for next frame!
-                                ackChannel.trySend(Unit)
-                            }
-                        }
-                    } catch (_: Exception) {}
-                    if (isActive) {
-                        closeReason = "Client closed connection (EOF)"
-                        try { socket.close() } catch (_: Exception) {}
-                    }
-                }
-
-                val outputStream = DataOutputStream(socket.getOutputStream())
-
-                // Initial state: ready to send first frame
-                ackChannel.trySend(Unit)
+                val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
 
                 while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
                     var frame = videoChannel.receive()
-                    // Drain conflated channel to ensure we always write the absolute freshest frame
+
+                    // Drain conflated channel to ensure we write the absolute freshest frame
                     while (true) {
                         val newer = videoChannel.tryReceive().getOrNull() ?: break
+                        frame.onWritten?.invoke() // release older replaced buffer
+                        framesDroppedCount++
                         frame = newer
                     }
-                    if (frame.isNotEmpty()) {
+
+                    if (frame.size > 0) {
                         try {
+                            // 16-byte big-endian header: magic (4B) + length (4B) + seq (4B) + flags (4B)
+                            outputStream.writeInt(VIDEO_FRAME_MAGIC)
                             outputStream.writeInt(frame.size)
-                            outputStream.write(frame)
+                            outputStream.writeInt(frame.sequenceNumber)
+                            outputStream.writeInt(0) // flags
+                            outputStream.write(frame.data, 0, frame.size)
                             outputStream.flush()
+
+                            frame.onWritten?.invoke() // release buffer back to pool
                             framesSentCount++
                             maybeUpdateStats()
-
-                            // Ultra-low latency pacing: wait for client ACK before sending next frame.
-                            // If receiver is decoding or network has jitter, videoChannel drops stale frames.
-                            // Safety timeout of 45ms ensures we never freeze if an ACK packet is lost.
-                            withTimeoutOrNull(45L) {
-                                ackChannel.receive()
-                            }
                         } catch (e: IOException) {
+                            frame.onWritten?.invoke()
                             closeReason = "Write failed: ${e.message ?: "Broken pipe"}"
                             break
                         }
+                    } else {
+                        frame.onWritten?.invoke()
                     }
                 }
             } catch (e: IOException) {
@@ -251,7 +316,6 @@ class RelayServer(
             } catch (e: Exception) {
                 closeReason = "Exception: ${e.message ?: "Error"}"
             } finally {
-                // Requirement A: Log every client end with the reason
                 onLog("TX-Relay", "Video client #$clientId ended. Reason: $closeReason", false)
                 try { socket.close() } catch (_: Exception) {}
                 if (currentVideoSession === session) {
@@ -269,51 +333,36 @@ class RelayServer(
     private fun handleNewAudioClient(socket: Socket, scope: CoroutineScope) {
         val clientId = clientCounter.incrementAndGet()
         val clientAddress = socket.inetAddress?.hostAddress ?: "Unknown"
-        // Requirement A: Log every accept
         onLog("TX-Relay", "Audio client #$clientId accepted from $clientAddress", false)
 
-        // Requirement A: When client is replaced, cancel its Job and close its socket immediately
         currentAudioSession?.let { old ->
             onLog("TX-Relay", "Ending prior audio client #${old.id} (replaced by client #$clientId)", false)
             try { old.socket.close() } catch (_: Exception) {}
             old.job.cancel()
         }
 
-        // Requirement B: Audio: bounded queue of at most 5 chunks (about 100 ms); drop the oldest when full
-        val audioChannel = Channel<ByteArray>(5, BufferOverflow.DROP_OLDEST)
+        val audioChannel = Channel<ByteArray>(Channel.CONFLATED)
 
         lateinit var session: AudioClientSession
         val job = scope.launch {
             var closeReason = "Normal completion"
             try {
-                // Low latency TCP configuration
                 socket.tcpNoDelay = true
-                socket.sendBufferSize = 32 * 1024
-                socket.receiveBufferSize = 32 * 1024
+                socket.sendBufferSize = 64 * 1024
+                socket.receiveBufferSize = 64 * 1024
                 try {
                     socket.setPerformancePreferences(0, 2, 1)
                 } catch (_: Exception) {}
 
-                // Immediate disconnect detector on incoming stream
-                launch {
-                    try {
-                        val input = socket.getInputStream()
-                        val dummy = ByteArray(32)
-                        while (isActive && !socket.isClosed && socket.isConnected) {
-                            val r = input.read(dummy)
-                            if (r == -1) break
-                        }
-                    } catch (_: Exception) {}
-                    if (isActive) {
-                        closeReason = "Client closed connection (EOF)"
-                        try { socket.close() } catch (_: Exception) {}
-                    }
-                }
-
-                val outputStream = DataOutputStream(socket.getOutputStream())
+                val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 16 * 1024))
 
                 while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
-                    val chunk = audioChannel.receive()
+                    var chunk = audioChannel.receive()
+                    while (true) {
+                        val newer = audioChannel.tryReceive().getOrNull() ?: break
+                        chunk = newer
+                    }
+
                     if (chunk.isNotEmpty()) {
                         try {
                             outputStream.writeInt(chunk.size)
@@ -332,7 +381,6 @@ class RelayServer(
             } catch (e: Exception) {
                 closeReason = "Exception: ${e.message ?: "Error"}"
             } finally {
-                // Requirement A: Log every client end with the reason
                 onLog("TX-Relay", "Audio client #$clientId ended. Reason: $closeReason", false)
                 try { socket.close() } catch (_: Exception) {}
                 if (currentAudioSession === session) {
@@ -351,24 +399,19 @@ class RelayServer(
         maybeUpdateStats(force = true)
     }
 
-    /**
-     * Tapped directly from UVC callback when a raw frame is captured.
-     */
     fun recordFrameCaptured() {
         framesCapturedCount++
         maybeUpdateStats()
     }
 
-    /**
-     * Submits an isolated JPEG frame for network transmission.
-     */
-    fun submitFrame(jpegBytes: ByteArray) {
+    fun submitFrame(jpegBytes: ByteArray, size: Int = jpegBytes.size, onWritten: (() -> Unit)? = null) {
         framesSubmittedCount++
-        lastFrameSize = jpegBytes.size
+        lastFrameSize = size
+        val seq = videoSeqCounter.incrementAndGet()
 
-        if (jpegBytes.size >= 2) {
+        if (size >= 2) {
             lastStartsSoi = (jpegBytes[0].toInt() and 0xFF) == 0xFF && (jpegBytes[1].toInt() and 0xFF) == 0xD8
-            lastEndsEoi = (jpegBytes[jpegBytes.size - 2].toInt() and 0xFF) == 0xFF && (jpegBytes[jpegBytes.size - 1].toInt() and 0xFF) == 0xD9
+            lastEndsEoi = (jpegBytes[size - 2].toInt() and 0xFF) == 0xFF && (jpegBytes[size - 1].toInt() and 0xFF) == 0xD9
         } else {
             lastStartsSoi = false
             lastEndsEoi = false
@@ -376,14 +419,17 @@ class RelayServer(
 
         val session = currentVideoSession
         if (session != null && session.job.isActive && !session.socket.isClosed && isRunning.get()) {
-            session.channel.trySend(jpegBytes)
+            val payload = VideoFramePayload(jpegBytes, size, seq, onWritten)
+            val sent = session.channel.trySend(payload)
+            if (!sent.isSuccess) {
+                onWritten?.invoke()
+            }
+        } else {
+            onWritten?.invoke()
         }
         maybeUpdateStats()
     }
 
-    /**
-     * Submits an audio PCM chunk for network transmission.
-     */
     fun submitAudio(pcmBytes: ByteArray) {
         audioCapturedCount++
         val session = currentAudioSession
@@ -398,7 +444,7 @@ class RelayServer(
         if (force || now - lastStatsUpdateTime >= 1000L) {
             lastStatsUpdateTime = now
             val isConn = currentVideoSession != null
-            val dropped = if (framesSubmittedCount > framesSentCount) framesSubmittedCount - framesSentCount else 0L
+            val dropped = if (framesSubmittedCount > framesSentCount) framesSubmittedCount - framesSentCount else framesDroppedCount
             _txStats.value = TxRelayStats(
                 framesCaptured = framesCapturedCount,
                 framesSubmitted = framesSubmittedCount,
@@ -415,10 +461,6 @@ class RelayServer(
         }
     }
 
-    /**
-     * Requirement A: stop() must cancel everything and start() must create a fresh scope,
-     * so repeated start/stop works cleanly.
-     */
     fun stop() {
         isRunning.set(false)
         _isServerActive.value = false
@@ -441,6 +483,19 @@ class RelayServer(
 
         try { audioServerSocket?.close() } catch (_: Exception) {}
         audioServerSocket = null
+
+        try { rttServerSocket?.close() } catch (_: Exception) {}
+        rttServerSocket = null
+
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (_: Exception) {}
+        wakeLock = null
+
+        try {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {}
+        wifiLock = null
 
         serverScope?.cancel()
         serverScope = null
