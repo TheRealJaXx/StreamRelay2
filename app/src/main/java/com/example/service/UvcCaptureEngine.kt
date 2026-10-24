@@ -246,13 +246,6 @@ class UvcCaptureEngine(
                             if (totalFramesCounter % 120L == 0L) {
                                 onLog("UVC", "MJPEG Frames: $totalFramesCounter | FPS: ${"%.1f".format(currentFps)} | Frame size: ${sizeBytes / 1024} KB", false)
                             }
-                        } else {
-                            _telemetry.value = _telemetry.value.copy(
-                                isStreaming = true,
-                                totalFrames = totalFramesCounter,
-                                lastFrameTimeMs = now,
-                                lastFrameSizeBytes = sizeBytes
-                            )
                         }
 
                         if (totalFramesCounter == 1L) {
@@ -262,10 +255,21 @@ class UvcCaptureEngine(
                         // Pool the per-frame ByteArray copy (released after socket write)
                         if (sizeBytes > 0) {
                             val targetFps = selectedPreset.targetFps
-                            val minIntervalNs = if (targetFps > 0) (1_000_000_000L / targetFps) - 2_500_000L else 0L
-                            val nowNs = System.nanoTime()
-                            if (minIntervalNs <= 0L || (nowNs - lastFrameDeliveredNs) >= minIntervalNs) {
-                                lastFrameDeliveredNs = nowNs
+                            val negotiatedFps = cameraHelper.previewSize?.fps ?: targetFps
+                            val shouldDeliver = if (negotiatedFps > targetFps && targetFps > 0) {
+                                val minIntervalNs = (1_000_000_000L / targetFps) - 2_500_000L
+                                val nowNs = System.nanoTime()
+                                if ((nowNs - lastFrameDeliveredNs) >= minIntervalNs) {
+                                    lastFrameDeliveredNs = nowNs
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                true
+                            }
+
+                            if (shouldDeliver) {
                                 val poolBuffer = acquireUvcBuffer(sizeBytes)
                                 val pos = byteBuffer.position()
                                 byteBuffer.get(poolBuffer, 0, sizeBytes)

@@ -105,6 +105,7 @@ fun TxScreen(
     val activeAudioDeviceName by viewModel.activeAudioDeviceName.collectAsStateWithLifecycle()
     val selectedPreset by viewModel.selectedPreset.collectAsStateWithLifecycle()
     val isLocalPreviewEnabled by viewModel.isLocalPreviewEnabled.collectAsStateWithLifecycle()
+    val isSend30FpsEnabled by viewModel.isSend30FpsEnabled.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -174,7 +175,9 @@ fun TxScreen(
                     isLocalPreviewEnabled = isLocalPreviewEnabled,
                     selectedPreset = selectedPreset,
                     telemetry = telemetry,
+                    isSend30FpsEnabled = isSend30FpsEnabled,
                     onTogglePreview = { viewModel.setLocalPreviewEnabled(it) },
+                    onToggleSend30Fps = { viewModel.setSend30FpsEnabled(it) },
                     onSelectPreset = { viewModel.selectPreset(it) },
                     availablePresets = viewModel.availablePresets,
                     onSurfaceHolderCreated = { viewModel.setLocalPreviewHolder(it) }
@@ -866,7 +869,9 @@ private fun TxPreviewMonitorCard(
     isLocalPreviewEnabled: Boolean,
     selectedPreset: com.example.model.StreamPreset,
     telemetry: com.example.model.CaptureTelemetry,
+    isSend30FpsEnabled: Boolean,
     onTogglePreview: (Boolean) -> Unit,
+    onToggleSend30Fps: (Boolean) -> Unit,
     onSelectPreset: (com.example.model.StreamPreset) -> Unit,
     availablePresets: List<com.example.model.StreamPreset>,
     onSurfaceHolderCreated: (SurfaceHolder?) -> Unit
@@ -967,6 +972,32 @@ private fun TxPreviewMonitorCard(
                     },
                     label = { Text("1080p30") },
                     modifier = Modifier.testTag("preset_1080p30_chip")
+                )
+            }
+
+            // Send 30 fps (lower latency) toggle
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "Send 30 fps (lower latency)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Halves network frame rate without changing camera capture",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Switch(
+                    checked = isSend30FpsEnabled,
+                    onCheckedChange = onToggleSend30Fps,
+                    modifier = Modifier.testTag("tx_send_30_fps_switch")
                 )
             }
 

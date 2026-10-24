@@ -253,7 +253,7 @@ class RelayClient(
                 val s = Socket()
                 s.tcpNoDelay = true
                 s.sendBufferSize = 64 * 1024
-                s.receiveBufferSize = 256 * 1024 // 256 KB SO_RCVBUF
+                s.receiveBufferSize = 64 * 1024 // 64 KB SO_RCVBUF
                 try {
                     s.setPerformancePreferences(0, 2, 1)
                 } catch (_: Exception) {}
@@ -272,7 +272,7 @@ class RelayClient(
                 onLog("RX-Relay", "Video socket connected to $host:$port", false)
                 updateStatsState(force = true)
 
-                val bufferedIn = BufferedInputStream(s.getInputStream(), 64 * 1024)
+                val bufferedIn = BufferedInputStream(s.getInputStream(), 32 * 1024)
                 val inputStream = DataInputStream(bufferedIn)
 
                 while (isRunning.get() && gen == connectionGeneration.get() && !s.isClosed && s.isConnected) {

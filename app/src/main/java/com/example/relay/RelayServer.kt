@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -102,6 +103,14 @@ class RelayServer(
 
     @Volatile
     private var currentAudioSession: AudioClientSession? = null
+
+    @Volatile
+    var targetFps: Int = 60
+
+    @Volatile
+    var send30FpsOnly: Boolean = false
+
+    private var send30FpsSkipNext = false
 
     // Counter accumulators
     private var framesCapturedCount = 0L
@@ -270,14 +279,15 @@ class RelayServer(
             try {
                 // Low latency TCP configuration
                 socket.tcpNoDelay = true
-                socket.sendBufferSize = 128 * 1024 // 128 KB SO_SNDBUF
+                socket.sendBufferSize = 48 * 1024 // 48 KB SO_SNDBUF
                 socket.receiveBufferSize = 64 * 1024
                 try {
                     socket.setPerformancePreferences(0, 2, 1)
                 } catch (_: Exception) {}
 
-                val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 64 * 1024))
+                val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 16 * 1024))
 
+                var discardNextFrame = false
                 while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
                     var frame = videoChannel.receive()
 
@@ -289,8 +299,17 @@ class RelayServer(
                         frame = newer
                     }
 
+                    if (discardNextFrame) {
+                        discardNextFrame = false
+                        frame.onWritten?.invoke()
+                        framesDroppedCount++
+                        maybeUpdateStats()
+                        continue
+                    }
+
                     if (frame.size > 0) {
                         try {
+                            val writeStartNs = System.nanoTime()
                             // 16-byte big-endian header: magic (4B) + length (4B) + seq (4B) + flags (4B)
                             outputStream.writeInt(VIDEO_FRAME_MAGIC)
                             outputStream.writeInt(frame.size)
@@ -298,6 +317,14 @@ class RelayServer(
                             outputStream.writeInt(0) // flags
                             outputStream.write(frame.data, 0, frame.size)
                             outputStream.flush()
+                            val writeDurationNs = System.nanoTime() - writeStartNs
+
+                            val fps = targetFps
+                            val frameIntervalMs = if (fps > 0) 1000L / fps else 33L
+                            val thresholdNs = 2L * frameIntervalMs * 1_000_000L
+                            if (writeDurationNs > thresholdNs) {
+                                discardNextFrame = true
+                            }
 
                             frame.onWritten?.invoke() // release buffer back to pool
                             framesSentCount++
@@ -341,7 +368,7 @@ class RelayServer(
             old.job.cancel()
         }
 
-        val audioChannel = Channel<ByteArray>(Channel.CONFLATED)
+        val audioChannel = Channel<ByteArray>(capacity = 6, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
         lateinit var session: AudioClientSession
         val job = scope.launch {
@@ -357,11 +384,7 @@ class RelayServer(
                 val outputStream = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 16 * 1024))
 
                 while (isActive && isRunning.get() && !socket.isClosed && socket.isConnected) {
-                    var chunk = audioChannel.receive()
-                    while (true) {
-                        val newer = audioChannel.tryReceive().getOrNull() ?: break
-                        chunk = newer
-                    }
+                    val chunk = audioChannel.receive()
 
                     if (chunk.isNotEmpty()) {
                         try {
@@ -415,6 +438,15 @@ class RelayServer(
         } else {
             lastStartsSoi = false
             lastEndsEoi = false
+        }
+
+        if (send30FpsOnly) {
+            send30FpsSkipNext = !send30FpsSkipNext
+            if (send30FpsSkipNext) {
+                onWritten?.invoke()
+                maybeUpdateStats()
+                return
+            }
         }
 
         val session = currentVideoSession

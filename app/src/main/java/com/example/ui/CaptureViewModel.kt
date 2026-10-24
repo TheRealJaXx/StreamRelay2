@@ -167,10 +167,22 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     private val _isLocalPreviewEnabled = MutableStateFlow(false)
     val isLocalPreviewEnabled: StateFlow<Boolean> = _isLocalPreviewEnabled.asStateFlow()
 
+    // Send 30 fps toggle on Transmitter (TX)
+    private val _isSend30FpsEnabled = MutableStateFlow(prefs.getBoolean("pref_tx_send_30_fps", false))
+    val isSend30FpsEnabled: StateFlow<Boolean> = _isSend30FpsEnabled.asStateFlow()
+
+    fun setSend30FpsEnabled(enabled: Boolean) {
+        _isSend30FpsEnabled.value = enabled
+        prefs.edit().putBoolean("pref_tx_send_30_fps", enabled).apply()
+        relayServer.send30FpsOnly = enabled
+    }
+
     private var currentLocalHolder: SurfaceHolder? = null
     private var offscreenDrainer: OffscreenDrainer? = null
 
     init {
+        relayServer.targetFps = _selectedPreset.value.targetFps
+        relayServer.send30FpsOnly = _isSend30FpsEnabled.value
         addLog("System", "Stream Relay initialized (Separate Video & Audio Sockets)", false)
 
         // Wire camera frames directly from UVC engine into TCP server using pooled buffers
@@ -461,6 +473,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     fun selectPreset(preset: StreamPreset) {
         _selectedPreset.value = preset
+        relayServer.targetFps = preset.targetFps
         uvcCaptureEngine.setStreamPreset(preset)
     }
 
