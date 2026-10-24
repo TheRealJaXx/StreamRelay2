@@ -106,6 +106,8 @@ fun TxScreen(
     val selectedPreset by viewModel.selectedPreset.collectAsStateWithLifecycle()
     val isLocalPreviewEnabled by viewModel.isLocalPreviewEnabled.collectAsStateWithLifecycle()
     val isSend30FpsEnabled by viewModel.isSend30FpsEnabled.collectAsStateWithLifecycle()
+    val connectedClientAddress by viewModel.txConnectedClientAddress.collectAsStateWithLifecycle()
+    val publishedStreamName = viewModel.publishedStreamName
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -188,6 +190,8 @@ fun TxScreen(
             item {
                 ClientConnectionStatusCard(
                     connectedClients = connectedClients,
+                    connectedClientAddress = connectedClientAddress,
+                    publishedStreamName = publishedStreamName,
                     isServerActive = isServerActive
                 )
             }
@@ -332,7 +336,7 @@ private fun LocalIpBannerCard(
             Spacer(modifier = Modifier.height(10.dp))
 
             Text(
-                text = "Enter this IP address on your Receiver (RX) tablet.",
+                text = "Zero-Config OMT LAN Discovery active • Or enter this IP address manually on receiver.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -343,48 +347,82 @@ private fun LocalIpBannerCard(
 @Composable
 private fun ClientConnectionStatusCard(
     connectedClients: Int,
+    connectedClientAddress: String?,
+    publishedStreamName: String,
     isServerActive: Boolean
 ) {
     val isClientActive = connectedClients > 0
-    val badgeColor = if (isClientActive) Color(0xFF10B981) else Color(0xFFF59E0B)
+    val tallyColor = if (isClientActive) Color(0xFFEF4444) else Color(0xFF10B981)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = androidx.compose.foundation.BorderStroke(1.dp, badgeColor.copy(alpha = 0.5f))
+        colors = CardDefaults.cardColors(
+            containerColor = if (isClientActive) Color(0xFF450A0A).copy(alpha = 0.5f) else MaterialTheme.colorScheme.surface
+        ),
+        border = androidx.compose.foundation.BorderStroke(
+            if (isClientActive) 1.5.dp else 1.dp,
+            if (isClientActive) Color(0xFFEF4444) else Color(0xFF10B981).copy(alpha = 0.5f)
+        )
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(badgeColor.copy(alpha = 0.15f)),
-                contentAlignment = Alignment.Center
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Icon(
-                    imageVector = Icons.Default.Router,
-                    contentDescription = null,
-                    tint = badgeColor,
-                    modifier = Modifier.size(24.dp)
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(12.dp)
+                            .clip(CircleShape)
+                            .background(tallyColor)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isClientActive) "🔴 LIVE ON-AIR" else "📡 OMT BROADCASTING",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = tallyColor
+                    )
+                }
+
+                Surface(
+                    color = tallyColor.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = if (isClientActive) "1 ACTIVE RECEIVER" else "READY FOR RX",
+                        color = tallyColor,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
             }
-            Spacer(modifier = Modifier.width(14.dp))
-            Column {
+
+            if (isClientActive && connectedClientAddress != null) {
                 Text(
-                    text = if (isClientActive) "1 Client Connected" else "Waiting for Client",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
+                    text = "Connected Receiver: $connectedClientAddress • Ultra-Low Latency Link",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFFECACA),
+                    fontFamily = FontFamily.Monospace
                 )
+            } else {
                 Text(
-                    text = if (isClientActive) "Relaying live MJPEG frames over TCP (TCP_NODELAY)" else "Server running in background with screen off",
+                    text = "Publishing OMT stream: \"$publishedStreamName\"",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "Receivers on the same Wi-Fi discover this transmitter automatically via mDNS (_omt._tcp) & UDP :6399.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF38BDF8)
                 )
             }
         }

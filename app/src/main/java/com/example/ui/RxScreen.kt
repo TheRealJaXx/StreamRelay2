@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -92,6 +93,7 @@ fun RxScreen(
     val isRxMuted by viewModel.isRxMuted.collectAsStateWithLifecycle()
     val audioProfile by viewModel.audioLatencyProfile.collectAsStateWithLifecycle()
     val audioDelayMs by viewModel.audioDelayMs.collectAsStateWithLifecycle()
+    val discoveredTransmitters by viewModel.discoveredTransmitters.collectAsStateWithLifecycle()
 
     var inputIp by remember(targetIp) { mutableStateOf(targetIp) }
     var inputPort by remember(targetPort) { mutableStateOf(targetPort.toString()) }
@@ -408,6 +410,123 @@ fun RxScreen(
                             .padding(14.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        // Open Media Transport (OMT) Discovered Transmitters Section
+                        if (discoveredTransmitters.isNotEmpty()) {
+                            Surface(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFF1E293B),
+                                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF10B981).copy(alpha = 0.5f))
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(8.dp)
+                                                    .clip(CircleShape)
+                                                    .background(Color(0xFF10B981))
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "OMT LAN TRANSMITTERS (${discoveredTransmitters.size})",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF34D399)
+                                            )
+                                        }
+                                        Text(
+                                            text = "Tap to Connect",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color(0xFF94A3B8)
+                                        )
+                                    }
+
+                                    discoveredTransmitters.forEach { tx ->
+                                        val isSelected = inputIp == tx.host && inputPort == tx.port.toString()
+                                        Surface(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clip(RoundedCornerShape(8.dp))
+                                                .clickable {
+                                                    inputIp = tx.host
+                                                    inputPort = tx.port.toString()
+                                                    viewModel.connectToTransmitter(tx)
+                                                },
+                                            color = if (isSelected) Color(0xFF0F766E).copy(alpha = 0.4f) else Color(0xFF0F172A).copy(alpha = 0.7f),
+                                            border = androidx.compose.foundation.BorderStroke(
+                                                1.dp,
+                                                if (isSelected) Color(0xFF14B8A6) else Color(0xFF334155)
+                                            )
+                                        ) {
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = tx.name,
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = Color.White
+                                                    )
+                                                    Text(
+                                                        text = "${tx.host}:${tx.port} • ${tx.fps} FPS • ${tx.discoveryMethod}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontFamily = FontFamily.Monospace,
+                                                        color = Color(0xFF38BDF8)
+                                                    )
+                                                }
+
+                                                Button(
+                                                    onClick = {
+                                                        inputIp = tx.host
+                                                        inputPort = tx.port.toString()
+                                                        viewModel.connectToTransmitter(tx)
+                                                    },
+                                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF059669)),
+                                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                                    modifier = Modifier.height(32.dp)
+                                                ) {
+                                                    Text("Connect", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (connectionState == RxConnectionState.DISCONNECTED) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF38BDF8))
+                                )
+                                Text(
+                                    text = "Scanning LAN for OMT transmitters (_omt._tcp & :6399)...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                        }
+
                         // IP & Port Fields
                         Row(
                             modifier = Modifier.fillMaxWidth(),

@@ -7,6 +7,7 @@ import android.view.SurfaceHolder
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.model.CaptureTelemetry
+import com.example.model.DiscoveredTransmitter
 import com.example.model.LogEntry
 import com.example.model.StreamPreset
 import com.example.model.UsbDeviceInfo
@@ -15,6 +16,7 @@ import com.example.relay.JpegUtils
 import com.example.relay.AudioLatencyProfile
 import com.example.relay.NetworkUtils
 import com.example.relay.OffscreenDrainer
+import com.example.relay.OmtDiscoveryManager
 import com.example.relay.RelayClient
 import com.example.relay.RelayServer
 import com.example.relay.RelayServerService
@@ -142,6 +144,23 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val rxConnectionState: StateFlow<RxConnectionState> = relayClient.connectionState
     val rxBitmap = relayClient.currentBitmap
     val rxStats: StateFlow<RxStats> = relayClient.stats
+
+    // Open Media Transport (OMT) Zero-Config LAN Discovery Engine
+    val omtDiscoveryManager = OmtDiscoveryManager(application) { tag, message, isError ->
+        addLog(tag, message, isError)
+    }
+
+    val discoveredTransmitters: StateFlow<List<DiscoveredTransmitter>> = omtDiscoveryManager.discoveredTransmitters
+    val isOmtDiscovering: StateFlow<Boolean> = omtDiscoveryManager.isDiscovering
+    val publishedStreamName: String
+        get() = omtDiscoveryManager.getPublishedStreamName()
+
+    val txConnectedClientAddress: StateFlow<String?> = relayServer.connectedClientAddress
+
+    fun connectToTransmitter(transmitter: DiscoveredTransmitter) {
+        setRxTarget(transmitter.host, transmitter.port)
+        connectRx()
+    }
 
     // Hardware-Free Latency Test Pattern Engine (TX)
     val latencyTestEngine = LatencyTestEngine(
@@ -335,6 +354,10 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 startTxRelayServer(_txPort.value)
                 audioCaptureEngine.start()
                 startCapture()
+
+                // OMT Discovery: Advertise this device on the local network
+                omtDiscoveryManager.stopScanning()
+                omtDiscoveryManager.startBroadcasting(_txPort.value, _selectedPreset.value.targetFps, hasAudio = true)
             }
             AppMode.TEST_TX -> {
                 audioCaptureEngine.stop()
@@ -349,6 +372,10 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 refreshLocalIp()
                 startTxRelayServer(_txPort.value)
                 latencyTestEngine.start(_testFps.value, _testAudioTick.value)
+
+                // OMT Discovery: Advertise latency test stream
+                omtDiscoveryManager.stopScanning()
+                omtDiscoveryManager.startBroadcasting(_txPort.value, _testFps.value, hasAudio = _testAudioTick.value)
             }
             AppMode.RX -> {
                 latencyTestEngine.stop()
@@ -361,8 +388,14 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 releaseOffscreenSurface()
                 usbMonitor.stop()
                 relayClient.setMuted(false)
+
+                // OMT Discovery: Scan for active transmitters on the network
+                omtDiscoveryManager.stopBroadcasting()
+                omtDiscoveryManager.startScanning()
             }
             AppMode.ROUND_TRIP -> {
+                omtDiscoveryManager.stopBroadcasting()
+                omtDiscoveryManager.stopScanning()
                 audioCaptureEngine.stop()
                 _isLocalPreviewEnabled.value = true
                 refreshLocalIp()
@@ -384,6 +417,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 relayClient.connect("127.0.0.1", _txPort.value)
             }
             AppMode.UNSELECTED -> {
+                omtDiscoveryManager.stopBroadcasting()
+                omtDiscoveryManager.stopScanning()
                 latencyTestEngine.stop()
                 audioCaptureEngine.stop()
                 _isLocalPreviewEnabled.value = false
@@ -575,5 +610,6 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         releaseOffscreenSurface()
         uvcCaptureEngine.release()
         audioCaptureEngine.release()
+        omtDiscoveryManager.release()
     }
 }

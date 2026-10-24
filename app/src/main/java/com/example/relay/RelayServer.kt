@@ -66,6 +66,9 @@ class RelayServer(
     private val _connectedClients = MutableStateFlow(0)
     val connectedClients: StateFlow<Int> = _connectedClients.asStateFlow()
 
+    private val _connectedClientAddress = MutableStateFlow<String?>(null)
+    val connectedClientAddress: StateFlow<String?> = _connectedClientAddress.asStateFlow()
+
     private val _serverPort = MutableStateFlow(4120)
     val serverPort: StateFlow<Int> = _serverPort.asStateFlow()
 
@@ -417,8 +420,10 @@ class RelayServer(
     }
 
     private fun updateConnectedClients() {
-        val count = if (currentVideoSession != null) 1 else 0
+        val session = currentVideoSession
+        val count = if (session != null) 1 else 0
         _connectedClients.value = count
+        _connectedClientAddress.value = session?.socket?.inetAddress?.hostAddress
         maybeUpdateStats(force = true)
     }
 
@@ -497,6 +502,7 @@ class RelayServer(
         isRunning.set(false)
         _isServerActive.value = false
         _connectedClients.value = 0
+        _connectedClientAddress.value = null
 
         currentVideoSession?.let {
             try { it.socket.close() } catch (_: Exception) {}

@@ -52,3 +52,17 @@ data class LogEntry(
     val message: String,
     val isError: Boolean = false
 )
+
+data class DiscoveredTransmitter(
+    val id: String,
+    val name: String,
+    val host: String,
+    val port: Int,
+    val fps: Int = 60,
+    val hasAudio: Boolean = true,
+    val discoveryMethod: String = "OMT Discovery",
+    val lastSeenMs: Long = System.currentTimeMillis()
+) {
+    val addressLabel: String
+        get() = "$host:$port"
+}
