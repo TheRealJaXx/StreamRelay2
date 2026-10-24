@@ -167,6 +167,12 @@ class RelayClient(
 
     fun setMuted(muted: Boolean) {
         _isMuted.value = muted
+        if (muted) {
+            synchronized(audioJitterLock) {
+                audioJitterQueue.clear()
+                audioJitterBufferedBytes = 0
+            }
+        }
     }
 
     fun setAudioLatencyProfile(profile: AudioLatencyProfile) {
@@ -509,7 +515,10 @@ class RelayClient(
 
     private fun initAudioTrack() {
         try {
-            val minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
+            val minBuf = maxOf(
+                AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_OUT, AUDIO_FORMAT),
+                (SAMPLE_RATE * 4) / 20
+            )
             val attributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_GAME)
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -543,8 +552,13 @@ class RelayClient(
                 } catch (_: Exception) {}
             }
 
-            track.play()
-            audioTrack = track
+            if (track.state == AudioTrack.STATE_INITIALIZED) {
+                track.play()
+                audioTrack = track
+            } else {
+                track.release()
+                onLog("RX-Audio", "AudioTrack failed to initialize (state != STATE_INITIALIZED)", true)
+            }
         } catch (e: Exception) {
             onLog("RX-Audio", "Failed to initialize AudioTrack: ${e.message}", true)
         }

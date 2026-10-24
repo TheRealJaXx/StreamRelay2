@@ -58,6 +58,10 @@ class MainActivity : ComponentActivity() {
               Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
 
+            if (audioGranted && currentMode == AppMode.TX) {
+              viewModel.onAudioPermissionGranted()
+            }
+
             val needPermissions = mutableListOf<String>()
             if (!cameraGranted) needPermissions.add(Manifest.permission.CAMERA)
             if (!audioGranted) needPermissions.add(Manifest.permission.RECORD_AUDIO)

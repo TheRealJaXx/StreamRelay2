@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,6 +69,14 @@ class AudioCaptureEngine(
 
     init {
         setupDeviceCallback()
+        val initialUsb = findUsbAudioDevice()
+        if (initialUsb != null) {
+            val name = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                initialUsb.productName?.toString() ?: "USB Capture Audio"
+            } else "USB Capture Audio"
+            _activeDeviceName.value = name
+            _isUsbAudioConnected.value = true
+        }
     }
 
     private fun setupDeviceCallback() {
@@ -230,17 +239,41 @@ class AudioCaptureEngine(
             _isLocalPlaybackEnabled.value = false
         }
 
-        // 3. High-priority capture loop
+        // 3. High-priority capture loop with Stereo -> Mono fallback
         captureJob = audioScope.launch {
-            val minBufSize = maxOf(
-                AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG_IN, AUDIO_FORMAT),
-                SAMPLE_RATE * 4 / 20 // 50ms buffer
-            )
+            var channelConfig = AudioFormat.CHANNEL_IN_STEREO
+            var minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, channelConfig, AUDIO_FORMAT)
+            var isMono = false
 
-            val record = initAudioRecord(SAMPLE_RATE, minBufSize, usbDevice)
+            if (minBufSize <= 0) {
+                channelConfig = AudioFormat.CHANNEL_IN_MONO
+                minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, channelConfig, AUDIO_FORMAT)
+                isMono = true
+            }
+
+            val bytesPerMs = if (isMono) (SAMPLE_RATE * 2 / 1000) else (SAMPLE_RATE * 4 / 1000)
+            val bufferSize = maxOf(if (minBufSize > 0) minBufSize else bytesPerMs * 50, bytesPerMs * 50)
+
+            var record = initAudioRecord(SAMPLE_RATE, channelConfig, bufferSize, usbDevice)
+            if (record == null && !isMono) {
+                // If stereo initialization failed on hardware, fallback to mono
+                channelConfig = AudioFormat.CHANNEL_IN_MONO
+                val monoMin = AudioRecord.getMinBufferSize(SAMPLE_RATE, channelConfig, AUDIO_FORMAT)
+                val monoBytesPerMs = SAMPLE_RATE * 2 / 1000
+                val monoBuf = maxOf(if (monoMin > 0) monoMin else monoBytesPerMs * 50, monoBytesPerMs * 50)
+                record = initAudioRecord(SAMPLE_RATE, channelConfig, monoBuf, usbDevice)
+                if (record != null) {
+                    isMono = true
+                }
+            }
+
             if (record == null || record.state != AudioRecord.STATE_INITIALIZED) {
-                onLog("TX-Audio", "Failed to initialize AudioRecord. Retrying...", true)
+                onLog("TX-Audio", "Failed to initialize AudioRecord. Retrying in 2s...", true)
                 _isCapturing.value = false
+                delay(2000)
+                if (isRunning.get()) {
+                    startCaptureLoop()
+                }
                 return@launch
             }
 
@@ -249,28 +282,33 @@ class AudioCaptureEngine(
             try {
                 record.startRecording()
                 _isCapturing.value = true
+                val modeDesc = if (isMono) "48kHz Mono -> Stereo" else "48kHz Stereo"
                 if (isUsb) {
-                    onLog("TX-Audio", "Audio capturing from USB card: $deviceName (48kHz Stereo)", false)
+                    onLog("TX-Audio", "Audio capturing from USB card: $deviceName ($modeDesc)", false)
                 } else {
-                    onLog("TX-Audio", "Audio capturing from mic (Local speaker muted to prevent howl-round)", false)
+                    onLog("TX-Audio", "Audio capturing from mic ($modeDesc, Local speaker muted to prevent howl-round)", false)
                 }
 
-                // 20ms chunks (48000 samples/sec * 4 bytes/sample / 50 = 3840 bytes)
-                val chunkSize = (SAMPLE_RATE * 4) / 50
+                // 20ms chunks: Mono = 1920 bytes, Stereo = 3840 bytes
+                val chunkSize = if (isMono) (SAMPLE_RATE * 2) / 50 else (SAMPLE_RATE * 4) / 50
                 val pcmBuffer = ByteArray(chunkSize)
 
                 while (isRunning.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     val readBytes = record.read(pcmBuffer, 0, pcmBuffer.size)
                     if (readBytes > 0) {
-                        val chunkCopy = pcmBuffer.copyOf(readBytes)
+                        val stereoChunk = if (isMono) {
+                            monoToStereo(pcmBuffer, readBytes)
+                        } else {
+                            pcmBuffer.copyOf(readBytes)
+                        }
 
                         // ANTI-FEEDBACK: Only send to local phone speaker if capturing from USB hardware
                         if (_isLocalPlaybackEnabled.value && _isUsbAudioConnected.value) {
-                            localPlaybackChannel.trySend(chunkCopy)
+                            localPlaybackChannel.trySend(stereoChunk)
                         }
 
                         // Forward to network relay (stream to remote RX)
-                        onAudioChunkCaptured?.invoke(chunkCopy)
+                        onAudioChunkCaptured?.invoke(stereoChunk)
                     }
                 }
             } catch (e: Exception) {
@@ -286,12 +324,35 @@ class AudioCaptureEngine(
         }
     }
 
-    private fun initAudioRecord(sampleRate: Int, bufferSize: Int, usbDevice: AudioDeviceInfo?): AudioRecord? {
+    private fun monoToStereo(mono: ByteArray, length: Int): ByteArray {
+        val numSamples = length / 2
+        val stereo = ByteArray(numSamples * 4)
+        var src = 0
+        var dst = 0
+        for (i in 0 until numSamples) {
+            val b0 = mono[src]
+            val b1 = mono[src + 1]
+            src += 2
+            stereo[dst] = b0
+            stereo[dst + 1] = b1
+            stereo[dst + 2] = b0
+            stereo[dst + 3] = b1
+            dst += 4
+        }
+        return stereo
+    }
+
+    private fun initAudioRecord(
+        sampleRate: Int,
+        channelConfig: Int,
+        bufferSize: Int,
+        usbDevice: AudioDeviceInfo?
+    ): AudioRecord? {
         val audioSources = intArrayOf(
-            MediaRecorder.AudioSource.UNPROCESSED,
             MediaRecorder.AudioSource.MIC,
             MediaRecorder.AudioSource.DEFAULT,
-            MediaRecorder.AudioSource.CAMCORDER
+            MediaRecorder.AudioSource.CAMCORDER,
+            MediaRecorder.AudioSource.UNPROCESSED
         )
 
         for (source in audioSources) {
@@ -303,7 +364,7 @@ class AudioCaptureEngine(
                             AudioFormat.Builder()
                                 .setEncoding(AUDIO_FORMAT)
                                 .setSampleRate(sampleRate)
-                                .setChannelMask(CHANNEL_CONFIG_IN)
+                                .setChannelMask(channelConfig)
                                 .build()
                         )
                         .setBufferSizeInBytes(bufferSize)
@@ -311,7 +372,7 @@ class AudioCaptureEngine(
                     val record = builder.build()
                     if (record.state == AudioRecord.STATE_INITIALIZED) {
                         if (usbDevice != null) {
-                            record.setPreferredDevice(usbDevice)
+                            try { record.setPreferredDevice(usbDevice) } catch (_: Exception) {}
                         }
                         return record
                     } else {
@@ -319,7 +380,7 @@ class AudioCaptureEngine(
                     }
                 } else {
                     @Suppress("DEPRECATION")
-                    val record = AudioRecord(source, sampleRate, CHANNEL_CONFIG_IN, AUDIO_FORMAT, bufferSize)
+                    val record = AudioRecord(source, sampleRate, channelConfig, AUDIO_FORMAT, bufferSize)
                     if (record.state == AudioRecord.STATE_INITIALIZED) {
                         return record
                     } else {
@@ -333,7 +394,10 @@ class AudioCaptureEngine(
 
     private fun initLocalAudioTrack(sampleRate: Int): AudioTrack? {
         return try {
-            val minBufSize = AudioTrack.getMinBufferSize(sampleRate, CHANNEL_CONFIG_OUT, AUDIO_FORMAT)
+            val minBufSize = maxOf(
+                AudioTrack.getMinBufferSize(sampleRate, CHANNEL_CONFIG_OUT, AUDIO_FORMAT),
+                (sampleRate * 4) / 20
+            )
             val attributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_GAME)
                 .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)

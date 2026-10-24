@@ -333,6 +333,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 uvcCaptureEngine.setPreviewSurface(targetSurface)
                 uvcCaptureEngine.setStreamPreset(_selectedPreset.value)
                 startTxRelayServer(_txPort.value)
+                audioCaptureEngine.start()
                 startCapture()
             }
             AppMode.TEST_TX -> {
@@ -359,6 +360,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 uvcCaptureEngine.setPreviewSurface(null)
                 releaseOffscreenSurface()
                 usbMonitor.stop()
+                relayClient.setMuted(false)
             }
             AppMode.ROUND_TRIP -> {
                 audioCaptureEngine.stop()
@@ -448,11 +450,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     fun startTxRelayServer(port: Int = _txPort.value) {
         refreshLocalIp()
         relayServer.start(port)
-        // Only start audio capture on TX if USB audio hardware is connected or explicit client connected
-        if (_currentMode.value == AppMode.TX && isUsbAudioConnected.value) {
+        if (_currentMode.value == AppMode.TX) {
             audioCaptureEngine.start()
-        } else {
-            audioCaptureEngine.stop()
         }
         RelayServerService.start(getApplication())
     }
@@ -464,6 +463,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun connectRx() {
+        relayClient.setMuted(false)
         relayClient.connect(_rxTargetIp.value, _rxTargetPort.value)
     }
 
