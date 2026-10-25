@@ -193,44 +193,6 @@ class RelayClient(
         mjpegPlayer.detachSurface()
     }
 
-    fun pushExternalAudioChunk(pcmBytes: ByteArray) {
-        audioPacketsCount++
-        val profile = _audioLatencyProfile.value
-        val delayMs = _audioDelayMs.value
-        val capMaxBytes = (profile.capMaxMs + delayMs) * BYTES_PER_MS
-        val hardCapBytes = maxOf(capMaxBytes * 2, capMaxBytes + 3840 * 2)
-
-        synchronized(audioJitterLock) {
-            audioJitterQueue.addLast(pcmBytes)
-            audioJitterBufferedBytes += pcmBytes.size
-
-            while (audioJitterBufferedBytes > hardCapBytes && audioJitterQueue.isNotEmpty()) {
-                val dropped = audioJitterQueue.pollFirst()
-                if (dropped != null) {
-                    audioJitterBufferedBytes -= dropped.size
-                }
-            }
-            audioJitterLock.notify()
-        }
-    }
-
-    fun pushExternalVideoFrame(jpegBytes: ByteArray) {
-        videoPacketsCount++
-        videoBytesCounter += jpegBytes.size
-        lastVideoPacketTimestamp = SystemClock.elapsedRealtime()
-        val seq = (videoPacketsCount % 1_000_000).toInt()
-        val buf = mjpegPlayer.acquireBuffer(jpegBytes.size)
-        System.arraycopy(jpegBytes, 0, buf, 0, jpegBytes.size)
-        mjpegPlayer.submit(buf, jpegBytes.size, seq)
-    }
-
-    fun startAudioPlaybackOnly() {
-        val gen = connectionGeneration.incrementAndGet()
-        isManuallyStopped.set(false)
-        isRunning.set(true)
-        startAudioPlaybackThread(gen)
-    }
-
     fun connect(host: String, port: Int) {
         val gen = connectionGeneration.incrementAndGet()
         isManuallyStopped.set(false)

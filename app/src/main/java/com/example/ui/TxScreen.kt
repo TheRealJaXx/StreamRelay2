@@ -110,8 +110,6 @@ fun TxScreen(
     val isSend30FpsEnabled by viewModel.isSend30FpsEnabled.collectAsStateWithLifecycle()
     val connectedClientAddress by viewModel.txConnectedClientAddress.collectAsStateWithLifecycle()
     val publishedStreamName = viewModel.publishedStreamName
-    val transportProtocol by viewModel.transportProtocol.collectAsStateWithLifecycle()
-    val videoCodec by viewModel.videoCodec.collectAsStateWithLifecycle()
     val isBackgroundServiceArmed by viewModel.isBackgroundServiceArmed.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
@@ -176,14 +174,10 @@ fun TxScreen(
                 )
             }
 
-            // Screen-Lock Background & Protocol Configuration
+            // Screen-Lock Background Status
             item {
-                TxStreamingConfigCard(
-                    isBackgroundArmed = isBackgroundServiceArmed,
-                    transportProtocol = transportProtocol,
-                    videoCodec = videoCodec,
-                    onSelectTransport = { viewModel.setTransportProtocol(it) },
-                    onSelectCodec = { viewModel.setVideoCodec(it) }
+                TxScreenLockStatusCard(
+                    isBackgroundArmed = isBackgroundServiceArmed
                 )
             }
 
@@ -1106,12 +1100,8 @@ private fun TxPreviewMonitorCard(
 }
 
 @Composable
-private fun TxStreamingConfigCard(
-    isBackgroundArmed: Boolean,
-    transportProtocol: com.example.ui.TransportProtocol,
-    videoCodec: com.example.ui.VideoCodec,
-    onSelectTransport: (com.example.ui.TransportProtocol) -> Unit,
-    onSelectCodec: (com.example.ui.VideoCodec) -> Unit
+private fun TxScreenLockStatusCard(
+    isBackgroundArmed: Boolean
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1122,10 +1112,8 @@ private fun TxStreamingConfigCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .padding(16.dp)
         ) {
-            // Background screen-off status badge
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(10.dp),
@@ -1155,50 +1143,6 @@ private fun TxStreamingConfigCard(
                             else "Service starts automatically when streaming begins.",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            // Transport Protocol Selection (TCP vs UDP)
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = "Transport Protocol",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    com.example.ui.TransportProtocol.entries.forEach { proto ->
-                        FilterChip(
-                            selected = transportProtocol == proto,
-                            onClick = { onSelectTransport(proto) },
-                            label = { Text(proto.label, style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-
-            // Video Codec Selection (MJPEG vs H.264)
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = "Video Encoding",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    com.example.ui.VideoCodec.entries.forEach { codec ->
-                        FilterChip(
-                            selected = videoCodec == codec,
-                            onClick = { onSelectCodec(codec) },
-                            label = { Text(codec.label, style = MaterialTheme.typography.labelSmall) },
-                            modifier = Modifier.weight(1f)
                         )
                     }
                 }

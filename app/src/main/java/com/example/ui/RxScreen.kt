@@ -94,7 +94,6 @@ fun RxScreen(
     val audioProfile by viewModel.audioLatencyProfile.collectAsStateWithLifecycle()
     val audioDelayMs by viewModel.audioDelayMs.collectAsStateWithLifecycle()
     val discoveredTransmitters by viewModel.discoveredTransmitters.collectAsStateWithLifecycle()
-    val transportProtocol by viewModel.transportProtocol.collectAsStateWithLifecycle()
 
     var inputIp by remember(targetIp) { mutableStateOf(targetIp) }
     var inputPort by remember(targetPort) { mutableStateOf(targetPort.toString()) }
@@ -607,31 +606,6 @@ fun RxScreen(
                                 steps = 19,
                                 modifier = Modifier.weight(1f)
                             )
-                        }
-
-                        // Transport Protocol Selector (UDP vs TCP)
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = "Transport:",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color(0xFF94A3B8),
-                                fontWeight = FontWeight.Bold
-                            )
-                            com.example.ui.TransportProtocol.entries.forEach { proto ->
-                                FilterChip(
-                                    selected = transportProtocol == proto,
-                                    onClick = { viewModel.setTransportProtocol(proto) },
-                                    label = { Text(proto.label, style = MaterialTheme.typography.labelSmall) },
-                                    colors = FilterChipDefaults.filterChipColors(
-                                        selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
-                                        selectedLabelColor = MaterialTheme.colorScheme.primary
-                                    )
-                                )
-                            }
                         }
 
                         // Connect / Disconnect Action Button
