@@ -280,6 +280,10 @@ class AudioCaptureEngine(
             audioRecord = record
 
             try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (_: Exception) {}
+
+            try {
                 record.startRecording()
                 _isCapturing.value = true
                 val modeDesc = if (isMono) "48kHz Mono -> Stereo" else "48kHz Stereo"
@@ -290,25 +294,49 @@ class AudioCaptureEngine(
                 }
 
                 // 20ms chunks: Mono = 1920 bytes, Stereo = 3840 bytes
-                val chunkSize = if (isMono) (SAMPLE_RATE * 2) / 50 else (SAMPLE_RATE * 4) / 50
-                val pcmBuffer = ByteArray(chunkSize)
+                val targetChunkSize = if (isMono) (SAMPLE_RATE * 2) / 50 else (SAMPLE_RATE * 4) / 50
+                val readBuf = ByteArray(targetChunkSize)
+                var accumBuf = ByteArray(targetChunkSize * 4)
+                var accumCount = 0
 
                 while (isRunning.get() && record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                    val readBytes = record.read(pcmBuffer, 0, pcmBuffer.size)
+                    val readBytes = record.read(readBuf, 0, readBuf.size)
                     if (readBytes > 0) {
-                        val stereoChunk = if (isMono) {
-                            monoToStereo(pcmBuffer, readBytes)
-                        } else {
-                            pcmBuffer.copyOf(readBytes)
+                        // Ensure accumulator has enough capacity
+                        if (accumCount + readBytes > accumBuf.size) {
+                            val newSize = maxOf(accumBuf.size * 2, accumCount + readBytes)
+                            val newBuf = ByteArray(newSize)
+                            System.arraycopy(accumBuf, 0, newBuf, 0, accumCount)
+                            accumBuf = newBuf
                         }
+                        System.arraycopy(readBuf, 0, accumBuf, accumCount, readBytes)
+                        accumCount += readBytes
 
-                        // ANTI-FEEDBACK: Only send to local phone speaker if capturing from USB hardware
-                        if (_isLocalPlaybackEnabled.value && _isUsbAudioConnected.value) {
-                            localPlaybackChannel.trySend(stereoChunk)
+                        // Extract complete 20ms aligned frames
+                        while (accumCount >= targetChunkSize) {
+                            val rawFrame = ByteArray(targetChunkSize)
+                            System.arraycopy(accumBuf, 0, rawFrame, 0, targetChunkSize)
+
+                            val remaining = accumCount - targetChunkSize
+                            if (remaining > 0) {
+                                System.arraycopy(accumBuf, targetChunkSize, accumBuf, 0, remaining)
+                            }
+                            accumCount = remaining
+
+                            val stereoChunk = if (isMono) {
+                                monoToStereo(rawFrame, targetChunkSize)
+                            } else {
+                                rawFrame
+                            }
+
+                            // ANTI-FEEDBACK: Only send to local phone speaker if capturing from USB hardware
+                            if (_isLocalPlaybackEnabled.value && _isUsbAudioConnected.value) {
+                                localPlaybackChannel.trySend(stereoChunk)
+                            }
+
+                            // Forward to network relay (stream to remote RX)
+                            onAudioChunkCaptured?.invoke(stereoChunk)
                         }
-
-                        // Forward to network relay (stream to remote RX)
-                        onAudioChunkCaptured?.invoke(stereoChunk)
                     }
                 }
             } catch (e: Exception) {

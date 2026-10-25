@@ -38,9 +38,9 @@ enum class RxConnectionState {
 }
 
 enum class AudioLatencyProfile(val label: String, val targetMinMs: Int, val capMaxMs: Int) {
-    GAME("Game (40/80 ms)", 40, 80),
-    BALANCED("Balanced (60/120 ms)", 60, 120),
-    SMOOTH("Smooth (120/200 ms)", 120, 200)
+    GAME("Game (30/120 ms)", 30, 120),
+    BALANCED("Balanced (50/180 ms)", 50, 180),
+    SMOOTH("Smooth (80/260 ms)", 80, 260)
 }
 
 data class RxStats(
@@ -80,6 +80,7 @@ class RelayClient(
         // 20ms chunk = 3840 bytes
         const val BYTES_PER_MS = 192
         const val SILENCE_CHUNK_BYTES = BYTES_PER_MS * 20 // 3840 bytes
+        const val COMFORT_SILENCE_BYTES = BYTES_PER_MS * 5 // 960 bytes (5ms)
     }
 
     private val clientScope = CoroutineScope(Dispatchers.IO)
@@ -171,6 +172,7 @@ class RelayClient(
             synchronized(audioJitterLock) {
                 audioJitterQueue.clear()
                 audioJitterBufferedBytes = 0
+                audioJitterLock.notifyAll()
             }
         }
     }
@@ -242,6 +244,12 @@ class RelayClient(
         isAudioSocketConnected = false
 
         releaseAudioTrack()
+
+        synchronized(audioJitterLock) {
+            audioJitterQueue.clear()
+            audioJitterBufferedBytes = 0
+            audioJitterLock.notifyAll()
+        }
 
         _connectionState.value = RxConnectionState.DISCONNECTED
         statusDetailMessage = "Disconnected"
@@ -342,6 +350,7 @@ class RelayClient(
             try {
                 val s = Socket()
                 s.tcpNoDelay = true
+                try { s.trafficClass = 0x10 } catch (_: Exception) {} // IPTOS_LOWDELAY
                 s.sendBufferSize = 64 * 1024
                 s.receiveBufferSize = 64 * 1024
                 s.connect(InetSocketAddress(host, port), 4000)
@@ -372,19 +381,21 @@ class RelayClient(
                     val profile = _audioLatencyProfile.value
                     val delayMs = _audioDelayMs.value
                     val capMaxBytes = (profile.capMaxMs + delayMs) * BYTES_PER_MS
+                    val hardCapBytes = maxOf(capMaxBytes * 2, capMaxBytes + 3840 * 2)
 
-                    // Push to jitter buffer & keep capped
+                    // Push to jitter buffer and notify playback thread immediately
                     synchronized(audioJitterLock) {
                         audioJitterQueue.addLast(pcmBytes)
                         audioJitterBufferedBytes += pcmBytes.size
 
-                        // When above the cap drop the oldest in 20 ms steps
-                        while (audioJitterBufferedBytes > capMaxBytes && audioJitterQueue.isNotEmpty()) {
+                        // Hard cap to avoid unbounded backlog during long Wi-Fi stalls
+                        while (audioJitterBufferedBytes > hardCapBytes && audioJitterQueue.isNotEmpty()) {
                             val dropped = audioJitterQueue.pollFirst()
                             if (dropped != null) {
                                 audioJitterBufferedBytes -= dropped.size
                             }
                         }
+                        audioJitterLock.notify()
                     }
                 }
             } catch (e: Exception) {
@@ -454,10 +465,15 @@ class RelayClient(
     private fun startAudioPlaybackThread(gen: Int) {
         audioPlaybackJob?.cancel()
         audioPlaybackJob = clientScope.launch(Dispatchers.Default) {
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (_: Exception) {}
+
             initAudioTrack()
             val track = audioTrack ?: return@launch
-            val silenceChunk = ByteArray(SILENCE_CHUNK_BYTES)
+            val comfortSilence = ByteArray(COMFORT_SILENCE_BYTES)
             var isPrebuffering = true
+            var starvationCount = 0
 
             while (isActive && isRunning.get() && gen == connectionGeneration.get()) {
                 val profile = _audioLatencyProfile.value
@@ -473,16 +489,27 @@ class RelayClient(
                             isPrebuffering = false
                             chunkToPlay = audioJitterQueue.pollFirst()
                             chunkToPlay?.let { audioJitterBufferedBytes -= it.size }
+                        } else {
+                            try {
+                                audioJitterLock.wait(10)
+                            } catch (_: InterruptedException) {}
                         }
                     } else {
                         chunkToPlay = audioJitterQueue.pollFirst()
                         if (chunkToPlay != null) {
                             audioJitterBufferedBytes -= chunkToPlay.size
+                        } else {
+                            // Queue temporarily dry — wait up to 4ms for next TCP audio chunk
+                            try {
+                                audioJitterLock.wait(4)
+                            } catch (_: InterruptedException) {}
+                            chunkToPlay = audioJitterQueue.pollFirst()
+                            chunkToPlay?.let { audioJitterBufferedBytes -= it.size }
                         }
                     }
 
-                    // Strict cap enforcement
-                    while (audioJitterBufferedBytes > capMaxBytes && audioJitterQueue.isNotEmpty()) {
+                    // Enforce cap when buffer has accumulated beyond capMaxBytes + 1 frame headroom
+                    while (audioJitterBufferedBytes > (capMaxBytes + 3840) && audioJitterQueue.size > 2) {
                         val dropped = audioJitterQueue.pollFirst()
                         if (dropped != null) {
                             audioJitterBufferedBytes -= dropped.size
@@ -491,22 +518,21 @@ class RelayClient(
                 }
 
                 if (chunkToPlay != null) {
+                    starvationCount = 0
                     if (!_isMuted.value) {
                         track.write(chunkToPlay, 0, chunkToPlay.size)
                     }
                     if (!_isAudioPlaying.value) {
                         _isAudioPlaying.value = true
                     }
-                } else {
-                    // On underrun write at most 20 ms of silence and resume as soon as one chunk arrives (no full re-prebuffer)
-                    if (!isPrebuffering) {
+                } else if (!isPrebuffering) {
+                    starvationCount++
+                    // Only write 5ms comfort silence if starved for >20ms to prevent DAC pop
+                    if (starvationCount > 4) {
                         if (!_isMuted.value) {
-                            track.write(silenceChunk, 0, silenceChunk.size)
-                        } else {
-                            delay(20)
+                            track.write(comfortSilence, 0, comfortSilence.size)
                         }
-                    } else {
-                        delay(5)
+                        starvationCount = 0
                     }
                 }
             }

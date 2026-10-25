@@ -282,6 +282,7 @@ class RelayServer(
             try {
                 // Low latency TCP configuration
                 socket.tcpNoDelay = true
+                try { socket.trafficClass = 0x08 } catch (_: Exception) {} // IPTOS_THROUGHPUT
                 socket.sendBufferSize = 48 * 1024 // 48 KB SO_SNDBUF
                 socket.receiveBufferSize = 64 * 1024
                 try {
@@ -324,7 +325,7 @@ class RelayServer(
 
                             val fps = targetFps
                             val frameIntervalMs = if (fps > 0) 1000L / fps else 33L
-                            val thresholdNs = 2L * frameIntervalMs * 1_000_000L
+                            val thresholdNs = (1.2 * frameIntervalMs * 1_000_000L).toLong()
                             if (writeDurationNs > thresholdNs) {
                                 discardNextFrame = true
                             }
@@ -371,13 +372,14 @@ class RelayServer(
             old.job.cancel()
         }
 
-        val audioChannel = Channel<ByteArray>(capacity = 6, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        val audioChannel = Channel<ByteArray>(capacity = 30, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
         lateinit var session: AudioClientSession
         val job = scope.launch {
             var closeReason = "Normal completion"
             try {
                 socket.tcpNoDelay = true
+                try { socket.trafficClass = 0x10 } catch (_: Exception) {} // IPTOS_LOWDELAY
                 socket.sendBufferSize = 64 * 1024
                 socket.receiveBufferSize = 64 * 1024
                 try {

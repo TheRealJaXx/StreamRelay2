@@ -1,74 +1,35 @@
-# Stream Relay: Audio Stabilization & Performance Roadmap
+# StreamRelay / Capture Studio: Streaming Stabilization & Low-Latency Audio
 
-A clear, actionable plan to eliminate audio cutouts, automate device discovery, and achieve ultra-low latency without relying on impractical Bluetooth data transmission.
-
----
-
-## 1. Architectural Clarification: Bluetooth vs. Wi-Fi
-
-| Mechanism | Bandwidth | Typical Local Latency | Verdict for Video/Audio Relay |
-| :--- | :--- | :--- | :--- |
-| **Bluetooth RFCOMM/SPP** | ~0.8 – 1.5 Mbps | 30 – 100 ms | **Impractical**: Video requires 15–40 Mbps; Bluetooth packet scheduling introduces high latency. |
-| **Bluetooth Audio (A2DP)** | ~0.3 Mbps | 120 – 250 ms | **Too slow**: High encode/decode buffer delay causes severe audio lag. |
-| **Bluetooth Radio Coexistence** | Shared 2.4 GHz antenna | Variable jitter | **Degrading**: Transmitting Bluetooth concurrently causes Wi-Fi packet drops on mobile chips. |
-| **BLE for Discovery Only** | Minimal | N/A (beacon only) | **Viable**: Transmits tiny beacon packets solely to advertise IP and port for zero-config pairing. |
-| **Wi-Fi LAN / Hotspot** | 50 – 500+ Mbps | 1 – 5 ms | **Optimal**: High throughput, microsecond hardware buffers, supports 60 FPS truecolor feed. |
-
-**Conclusion:** Keep all audio and video streaming on Wi-Fi sockets. Focus optimization on adaptive jitter buffering, zero-config discovery, and peer-to-peer/hotspot direct streaming.
+## 1. Protocol Architecture: OMT vs. Dual-TCP Socket Pipeline
+- **Connection & Discovery:** Uses OMT's standardized discovery mechanisms:
+  - DNS-SD / mDNS advertising and discovery under the `_omt._tcp` service type via Android's `NsdManager`.
+  - UDP broadcast announcement beacons on port 6399 (`OmtDiscoveryManager.kt`).
+- **Media Transmission:** Dedicated independent dual-TCP socket channels:
+  - **Port $P$ (Video):** MJPEG frame stream with 16-byte protocol header (magic `0x53524C59`, length, sequence, flags). Conflated TX hand-off with buffer pooling.
+  - **Port $P+1$ (Audio):** Length-prefixed 48 kHz 16-bit uncompressed Stereo PCM stream.
+  - **Port $P+2$ (RTT):** 64-bit nanosecond echo probe for real-time round-trip latency statistics ($R_{avg}$ and $R_{95}$).
 
 ---
 
-## 2. Priority 1: Eliminating Audio Cutouts (Adaptive Jitter Buffer)
+## 2. Audio Break-Up Root Causes & Targeted Solutions
 
-### Problem Diagnosis
-The current fixed ~60 ms audio queue cuts out whenever a brief Wi-Fi retry or packet burst arrives 10–20 ms late. The `AudioTrack` drains to empty, forcing an audible silence gap before refilling.
+### Cause 1: TX Partial Driver Reads & Frame Alignment Breaking
+- **Issue:** ALSA / USB AudioRecord returned partial buffer reads (e.g., 1024 or 2048 bytes instead of 3840 bytes). Delivering partial or odd-byte slices broke 16-bit PCM word alignment and mono-to-stereo conversion, introducing clicks and stutter.
+- **Fix in `AudioCaptureEngine.kt`:** Added an aligned frame accumulator buffer ensuring every emitted audio chunk is strictly 3840 bytes (960 stereo samples = 20.00 ms at 48 kHz). Elevated thread priority to `THREAD_PRIORITY_URGENT_AUDIO`.
 
-### Solution Design
-1. **Dynamic Low-Latency Watermark:**
-   - Maintain a dynamic buffer target of **50–80 ms** during stable transmission.
-   - If transmission jitter spikes, automatically scale buffer depth up to **100 ms** to absorb fluctuations, then gently drift back down once stable.
-2. **Concealment over Hard Stalls:**
-   - In case of an underrun, write a micro-silence fade rather than hard stopping `AudioTrack`, avoiding audible clicks and speaker pops.
-3. **Audio-Video Desync Prevention:**
-   - If the audio queue exceeds 120 ms, drop the oldest chunk in micro-steps (20 ms at a time) so audio instantly re-syncs to live video without a sudden stutter.
-4. **Selectable Latency Modes in UI:**
-   - **Game Mode (Low Latency):** 40–60 ms buffer target (minimum latency for fast-paced gaming).
-   - **Balanced Mode (Default):** 70–90 ms buffer target (smooth audio even on typical home Wi-Fi).
-   - **Smooth Mode:** 120–150 ms buffer target (impermeable to congested networks).
+### Cause 2: TX Audio Channel Buffer Starvation on Wi-Fi Jitter
+- **Issue:** Transmitter audio channel capacity was only 6 chunks (120 ms). Any momentary Wi-Fi airtime contention (>100 ms) overflowed the channel, causing `trySend` to drop audio chunks before they reached the network socket.
+- **Fix in `RelayServer.kt`:** Expanded `audioChannel` capacity to 30 chunks (600 ms headroom, <115 KB RAM) and configured socket traffic class `0x10` (`IPTOS_LOWDELAY`).
 
----
+### Cause 3: TX Video Saturation Starving Shared Wi-Fi Airtime
+- **Issue:** When heavy video frames stalled during transmission, they saturated Wi-Fi airtime and delayed time-sensitive audio TCP packets.
+- **Fix in `RelayServer.kt`:** Lowered the socket write threshold to $1.2\times$ frame interval ($<20\text{ ms}$ at 60 FPS) to proactively drop the next video frame if network backpressure is detected, instantly vacating Wi-Fi airtime for audio delivery.
 
-## 3. Priority 2: Zero-Config Auto-Discovery (No Manual IP Typing)
-
-### Design
-- **Transmitter (TX):** Broadcasts a lightweight UDP discovery beacon on port `4122` every 1 second when relay is active:
-  `{"service": "StreamRelay", "videoPort": 4120, "audioPort": 4121, "device": "Pixel 7"}`
-- **Receiver (RX):** Listens on port `4122`. When a beacon is detected, automatically populates the transmitter's IP address and displays a one-tap **"Connect to TX"** banner.
-- **Manual Override:** Retains the manual IP entry field for networks with UDP broadcast isolation.
+### Cause 4: RX 20ms Blocking Silence Stalls & Premature Packet Dropping
+- **Issue:** Whenever the receiver jitter queue was momentarily empty (1–2 ms), the playback thread executed a blocking `track.write(silenceChunk, 0, 3840)` in `MODE_STREAM`, freezing the thread for 20 ms. During those 20 ms, incoming TCP packets accumulated, exceeded the strict 80 ms cap, and were discarded by `audioJitterQueue.pollFirst()`.
+- **Fix in `RelayClient.kt`:** Replaced the 20 ms blocking silence with a 4 ms lock wait (`audioJitterLock.wait(4)`), woken immediately by `audioJitterLock.notify()` when new chunks arrive. Relaxed GAME profile bounds to 30 ms target prebuffer and 120 ms cap. If prolonged starvation occurs (>20 ms), writes only 5 ms (960 bytes) of comfort silence.
 
 ---
 
-## 4. Priority 3: Immersive RX Display & Quality Presets
-
-1. **Aspect Ratio Modes on RX:**
-   - Quick toggle bar: `Fit` (preserves 16:9), `Crop/Fill` (fills tablet screen edge-to-edge), `16:9`, and `4:3`.
-2. **TX Quality Profiles:**
-   - **Performance:** 720p @ 60 FPS, JPEG quality 82 (~40 KB/frame, lowest bandwidth).
-   - **High Fidelity:** 1080p @ 60 FPS, JPEG quality 92 (~90 KB/frame, pristine gradients).
-
----
-
-## 5. Technical Implementation Steps
-
-1. **`RelayClient.kt`**:
-   - Upgrade the audio worker thread with an adaptive sliding-window jitter buffer (`AdaptiveJitterBuffer`).
-   - Add latency mode configuration (`Game`, `Balanced`, `Smooth`).
-2. **`DiscoveryService.kt`**:
-   - Implement `DiscoveryBeaconBroadcaster` on TX.
-   - Implement `DiscoveryBeaconListener` on RX.
-3. **`RxScreen.kt` & `TxScreen.kt`**:
-   - Add auto-discovered device card to the RX screen for one-tap connection.
-   - Add aspect ratio toggle and latency profile selector to RX quick bar.
-4. **Verification**:
-   - Verify build with `compile_applet`.
-   - Test audio playback stability under simulated burst delays.
+## 3. Custom Adaptive App Icon
+- Updated app launcher icons across all screen densities (`mdpi`, `hdpi`, `xhdpi`, `xxhdpi`, `xxxhdpi`) with the user's custom stylized cyan/white double-arrow 'S' on `#00183A` dark navy background.
