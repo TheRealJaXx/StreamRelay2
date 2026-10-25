@@ -23,6 +23,10 @@ import com.example.relay.RelayServerService
 import com.example.relay.RxConnectionState
 import com.example.relay.RxStats
 import com.example.relay.TxRelayStats
+import com.example.relay.UdpRelayServer
+import com.example.relay.UdpRelayClient
+import com.example.relay.HardwareH264Encoder
+import com.example.relay.HardwareH264Decoder
 import com.example.service.UvcCaptureEngine
 import com.example.service.UsbMonitor
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +51,16 @@ enum class AppMode {
 enum class RoundTripSource {
     TEST_PATTERN,
     HDMI_CAPTURE
+}
+
+enum class TransportProtocol(val label: String) {
+    TCP("TCP (Dual Socket)"),
+    UDP("UDP (Sequenced Datagrams)")
+}
+
+enum class VideoCodec(val label: String) {
+    MJPEG("MJPEG (Raw Frames)"),
+    H264("H.264 (Hardware Encoded)")
 }
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
@@ -113,6 +127,44 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         addLog(tag, message, isError)
     }
 
+    // Sequenced UDP Transport (TX & RX)
+    val udpRelayServer = UdpRelayServer { tag, message, isError ->
+        addLog(tag, message, isError)
+    }
+
+    val udpRelayClient = UdpRelayClient { tag, message, isError ->
+        addLog(tag, message, isError)
+    }
+
+    // Hardware H.264 Codec instances
+    private var h264Encoder: HardwareH264Encoder? = null
+    private var h264Decoder: HardwareH264Decoder? = null
+
+    // Transport & Codec Preferences
+    private val _transportProtocol = MutableStateFlow(
+        if (prefs.getString("pref_transport", "UDP") == "TCP") TransportProtocol.TCP else TransportProtocol.UDP
+    )
+    val transportProtocol: StateFlow<TransportProtocol> = _transportProtocol.asStateFlow()
+
+    private val _videoCodec = MutableStateFlow(
+        if (prefs.getString("pref_codec", "MJPEG") == "H264") VideoCodec.H264 else VideoCodec.MJPEG
+    )
+    val videoCodec: StateFlow<VideoCodec> = _videoCodec.asStateFlow()
+
+    val isBackgroundServiceArmed: StateFlow<Boolean> = RelayServerService.isServiceActive
+
+    fun setTransportProtocol(proto: TransportProtocol) {
+        _transportProtocol.value = proto
+        prefs.edit().putString("pref_transport", proto.name).apply()
+        addLog("System", "Transport changed to: ${proto.label}", false)
+    }
+
+    fun setVideoCodec(codec: VideoCodec) {
+        _videoCodec.value = codec
+        prefs.edit().putString("pref_codec", codec.name).apply()
+        addLog("System", "Video codec changed to: ${codec.label}", false)
+    }
+
     // Capture Card Audio Engine (TX) - Captures USB Audio & plays through phone speaker
     val audioCaptureEngine = AudioCaptureEngine(application) { tag, message, isError ->
         addLog(tag, message, isError)
@@ -166,10 +218,18 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val latencyTestEngine = LatencyTestEngine(
         onFrameGenerated = { jpegBytes ->
             relayServer.recordFrameCaptured()
-            relayServer.submitFrame(jpegBytes)
+            if (_transportProtocol.value == TransportProtocol.UDP) {
+                udpRelayServer.submitVideoFrame(jpegBytes, jpegBytes.size, codecId = 0, isKeyframe = true)
+            } else {
+                relayServer.submitFrame(jpegBytes)
+            }
         },
         onAudioChunkGenerated = { pcmBytes ->
-            relayServer.submitAudio(pcmBytes)
+            if (_transportProtocol.value == TransportProtocol.UDP) {
+                udpRelayServer.submitAudio(pcmBytes)
+            } else {
+                relayServer.submitAudio(pcmBytes)
+            }
         }
     )
 
@@ -194,6 +254,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         _isSend30FpsEnabled.value = enabled
         prefs.edit().putBoolean("pref_tx_send_30_fps", enabled).apply()
         relayServer.send30FpsOnly = enabled
+        udpRelayServer.send30FpsOnly = enabled
     }
 
     private var currentLocalHolder: SurfaceHolder? = null
@@ -202,32 +263,70 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     init {
         relayServer.targetFps = _selectedPreset.value.targetFps
         relayServer.send30FpsOnly = _isSend30FpsEnabled.value
-        addLog("System", "Stream Relay initialized (Separate Video & Audio Sockets)", false)
+        udpRelayServer.targetFps = _selectedPreset.value.targetFps
+        udpRelayServer.send30FpsOnly = _isSend30FpsEnabled.value
+        addLog("System", "Stream Relay initialized (TCP & UDP Multi-Transport)", false)
 
-        // Wire camera frames directly from UVC engine into TCP server using pooled buffers
+        // Wire camera frames directly from UVC engine into TCP/UDP server using pooled buffers
         uvcCaptureEngine.onRawFrameCapturedWithRelease = { rawBytes, sizeBytes, releaseAction ->
             relayServer.recordFrameCaptured()
 
             val isJpeg = sizeBytes >= 2 &&
                 (rawBytes[0].toInt() and 0xFF) == 0xFF && (rawBytes[1].toInt() and 0xFF) == 0xD8
 
-            if (isJpeg) {
-                relayServer.submitFrame(rawBytes, sizeBytes, releaseAction)
-            } else {
-                val telem = telemetry.value
-                val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
-                val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
-                val compressed = JpegUtils.compressYuvToJpeg(rawBytes.copyOf(sizeBytes), w, h, quality = 80)
+            val isUdp = _transportProtocol.value == TransportProtocol.UDP
+            val isH264 = _videoCodec.value == VideoCodec.H264
+
+            if (isH264 && !isJpeg) {
+                if (h264Encoder == null) {
+                    val telem = telemetry.value
+                    val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else _selectedPreset.value.width
+                    val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else _selectedPreset.value.height
+                    h264Encoder = HardwareH264Encoder(
+                        width = w,
+                        height = h,
+                        targetFps = _selectedPreset.value.targetFps
+                    ) { nalData, isKeyframe ->
+                        if (isUdp) {
+                            udpRelayServer.submitVideoFrame(nalData, nalData.size, codecId = 1, isKeyframe = isKeyframe)
+                        } else {
+                            relayServer.submitFrame(nalData, nalData.size)
+                        }
+                    }.also { it.start() }
+                }
+                h264Encoder?.encodeYuv(rawBytes.copyOf(sizeBytes))
                 releaseAction()
-                if (compressed != null) {
-                    relayServer.submitFrame(compressed, compressed.size)
+            } else {
+                if (isJpeg) {
+                    if (isUdp) {
+                        udpRelayServer.submitVideoFrame(rawBytes, sizeBytes, codecId = 0, isKeyframe = true, onWritten = releaseAction)
+                    } else {
+                        relayServer.submitFrame(rawBytes, sizeBytes, releaseAction)
+                    }
+                } else {
+                    val telem = telemetry.value
+                    val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
+                    val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
+                    val compressed = JpegUtils.compressYuvToJpeg(rawBytes.copyOf(sizeBytes), w, h, quality = 80)
+                    releaseAction()
+                    if (compressed != null) {
+                        if (isUdp) {
+                            udpRelayServer.submitVideoFrame(compressed, compressed.size, codecId = 0, isKeyframe = true)
+                        } else {
+                            relayServer.submitFrame(compressed, compressed.size)
+                        }
+                    }
                 }
             }
         }
 
-        // Wire raw PCM audio chunks directly from Audio engine into Audio TCP server
+        // Wire raw PCM audio chunks directly into Audio TCP/UDP server
         audioCaptureEngine.onAudioChunkCaptured = { pcmBytes ->
-            relayServer.submitAudio(pcmBytes)
+            if (_transportProtocol.value == TransportProtocol.UDP) {
+                udpRelayServer.submitAudio(pcmBytes)
+            } else {
+                relayServer.submitAudio(pcmBytes)
+            }
         }
 
         // Auto-start capture when device connects/permission granted in TX or ROUND_TRIP mode
@@ -311,10 +410,23 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     fun attachRxSurface(holder: SurfaceHolder) {
         relayClient.attachSurface(holder)
+        if (_videoCodec.value == VideoCodec.H264) {
+            try {
+                h264Decoder?.release()
+                val telem = telemetry.value
+                val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
+                val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
+                h264Decoder = HardwareH264Decoder(w, h, holder.surface).also { it.start() }
+            } catch (_: Exception) {}
+        }
     }
 
     fun detachRxSurface(holder: SurfaceHolder) {
         relayClient.detachSurface(holder)
+        try {
+            h264Decoder?.release()
+        } catch (_: Exception) {}
+        h264Decoder = null
     }
 
     fun onAudioPermissionGranted() {
@@ -484,7 +596,11 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     fun startTxRelayServer(port: Int = _txPort.value) {
         refreshLocalIp()
-        relayServer.start(port)
+        if (_transportProtocol.value == TransportProtocol.UDP) {
+            udpRelayServer.start(port)
+        } else {
+            relayServer.start(port)
+        }
         if (_currentMode.value == AppMode.TX) {
             audioCaptureEngine.start()
         }
@@ -493,17 +609,42 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
 
     fun stopTxRelayServer() {
         relayServer.stop()
+        udpRelayServer.stop()
         audioCaptureEngine.stop()
+        try {
+            h264Encoder?.release()
+        } catch (_: Exception) {}
+        h264Encoder = null
         RelayServerService.stop(getApplication())
     }
 
     fun connectRx() {
         relayClient.setMuted(false)
-        relayClient.connect(_rxTargetIp.value, _rxTargetPort.value)
+        if (_transportProtocol.value == TransportProtocol.UDP) {
+            relayClient.startAudioPlaybackOnly()
+            udpRelayClient.onAudioChunkReceived = { pcm ->
+                relayClient.pushExternalAudioChunk(pcm)
+            }
+            udpRelayClient.onVideoFrameReceived = { frameData, codecId, _ ->
+                if (codecId.toInt() == 1) {
+                    h264Decoder?.decodeNal(frameData)
+                } else {
+                    relayClient.pushExternalVideoFrame(frameData)
+                }
+            }
+            udpRelayClient.connect(_rxTargetIp.value, _rxTargetPort.value)
+        } else {
+            relayClient.connect(_rxTargetIp.value, _rxTargetPort.value)
+        }
     }
 
     fun disconnectRx() {
         relayClient.disconnect()
+        udpRelayClient.disconnect()
+        try {
+            h264Decoder?.release()
+        } catch (_: Exception) {}
+        h264Decoder = null
     }
 
     fun selectPreset(preset: StreamPreset) {

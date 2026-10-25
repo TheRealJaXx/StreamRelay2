@@ -29,6 +29,8 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Router
 import androidx.compose.material.icons.filled.Terminal
@@ -108,6 +110,9 @@ fun TxScreen(
     val isSend30FpsEnabled by viewModel.isSend30FpsEnabled.collectAsStateWithLifecycle()
     val connectedClientAddress by viewModel.txConnectedClientAddress.collectAsStateWithLifecycle()
     val publishedStreamName = viewModel.publishedStreamName
+    val transportProtocol by viewModel.transportProtocol.collectAsStateWithLifecycle()
+    val videoCodec by viewModel.videoCodec.collectAsStateWithLifecycle()
+    val isBackgroundServiceArmed by viewModel.isBackgroundServiceArmed.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -168,6 +173,17 @@ fun TxScreen(
                     isServerActive = isServerActive,
                     connectedClients = connectedClients,
                     onEditPort = { showPortDialog = true }
+                )
+            }
+
+            // Screen-Lock Background & Protocol Configuration
+            item {
+                TxStreamingConfigCard(
+                    isBackgroundArmed = isBackgroundServiceArmed,
+                    transportProtocol = transportProtocol,
+                    videoCodec = videoCodec,
+                    onSelectTransport = { viewModel.setTransportProtocol(it) },
+                    onSelectCodec = { viewModel.setVideoCodec(it) }
                 )
             }
 
@@ -1088,4 +1104,107 @@ private fun TxPreviewMonitorCard(
         }
     }
 }
+
+@Composable
+private fun TxStreamingConfigCard(
+    isBackgroundArmed: Boolean,
+    transportProtocol: com.example.ui.TransportProtocol,
+    videoCodec: com.example.ui.VideoCodec,
+    onSelectTransport: (com.example.ui.TransportProtocol) -> Unit,
+    onSelectCodec: (com.example.ui.VideoCodec) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Background screen-off status badge
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = if (isBackgroundArmed) Color(0xFF10B981).copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(1.dp, if (isBackgroundArmed) Color(0xFF10B981).copy(alpha = 0.5f) else Color.Transparent)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (isBackgroundArmed) Icons.Default.Lock else Icons.Default.LockOpen,
+                        contentDescription = null,
+                        tint = if (isBackgroundArmed) Color(0xFF10B981) else MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = if (isBackgroundArmed) "Screen-Lock Streaming Armed" else "Screen-Lock Service Idle",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isBackgroundArmed) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = if (isBackgroundArmed) "Safe to turn off screen to keep phone cool. CPU wake lock & Wi-Fi lock active."
+                            else "Service starts automatically when streaming begins.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Transport Protocol Selection (TCP vs UDP)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Transport Protocol",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    com.example.ui.TransportProtocol.entries.forEach { proto ->
+                        FilterChip(
+                            selected = transportProtocol == proto,
+                            onClick = { onSelectTransport(proto) },
+                            label = { Text(proto.label, style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+
+            // Video Codec Selection (MJPEG vs H.264)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Video Encoding",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    com.example.ui.VideoCodec.entries.forEach { codec ->
+                        FilterChip(
+                            selected = videoCodec == codec,
+                            onClick = { onSelectCodec(codec) },
+                            label = { Text(codec.label, style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 
