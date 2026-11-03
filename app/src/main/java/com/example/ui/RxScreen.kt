@@ -325,8 +325,9 @@ fun RxScreen(
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
                                 )
+                                val mbps = (stats.videoBytesPerSecond * 8f) / 1_000_000f
                                 Text(
-                                    text = "${stats.videoBytesPerSecond / 1024} kB/s",
+                                    text = "${stats.videoBytesPerSecond / 1024} kB/s (${"%.1f".format(mbps)} Mbps)",
                                     color = Color(0xFF38BDF8),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
@@ -345,7 +346,7 @@ fun RxScreen(
                                 )
                             }
 
-                            // Line 4: Audio Mute & Structure
+                            // Line 4: Audio Mute & Codec Info
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                 Row(
                                     verticalAlignment = Alignment.CenterVertically,
@@ -362,10 +363,11 @@ fun RxScreen(
                                     )
                                 }
                                 Text(
-                                    text = "Head: [${stats.lastFrameFirst4BytesHex}]",
-                                    color = Color(0xFFCBD5E1),
+                                    text = "Codec: ${stats.videoCodec}",
+                                    color = if (stats.videoCodec == "H.264") Color(0xFF34D399) else Color(0xFF38BDF8),
                                     style = MaterialTheme.typography.labelSmall,
-                                    fontFamily = FontFamily.Monospace
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
                                 )
                                 Text(
                                     text = "Res: ${stats.decodedBitmapSize}",

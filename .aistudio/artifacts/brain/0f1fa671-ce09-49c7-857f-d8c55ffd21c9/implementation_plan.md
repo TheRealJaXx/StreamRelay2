@@ -7,10 +7,10 @@ A comprehensive, low-latency roadmap to keep the transmitter streaming continuou
 ## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> The following user preferences were confirmed in Phase 1 and govern the architectural strategy:
-> 1. **Screen Locking & Thermal Management:** Use a full Android Foreground Service with CPU `PARTIAL_WAKE_LOCK` and high-performance `WIFI_MODE_FULL_HIGH_PERF` WifiLock, keeping USB video and audio capturing continuously while the device screen is completely locked.
-> 2. **Transport Evolution:** Transition both audio and video streams to a custom UDP protocol with packet sequencing, lightweight header framing, and reassembly to eliminate TCP head-of-line blocking on noisy Wi-Fi.
-> 3. **Next Feature Priority:** Introduce Android `MediaCodec` hardware H.264/HEVC video encoding to replace MJPEG, dropping network bandwidth from ~30 Mbps to 3–6 Mbps, dramatically reducing transmitter heat and power consumption.
+> The following user preferences govern the active architectural implementation:
+> 1. **Screen Locking & Thermal Management:** Android Foreground Service with CPU `PARTIAL_WAKE_LOCK` and high-performance `WIFI_MODE_FULL_HIGH_PERF` WifiLock, keeping USB video and audio capturing continuously while the transmitter screen is locked.
+> 2. **Transport Protocol:** Preserved dual TCP transport (video stream on port P, audio on port P+1, latency probe on port P+2) with `TCP_NODELAY`, 16-byte protocol framing, and independent processing threads.
+> 3. **Hardware H.264 Video Encoding:** Android `MediaCodec` hardware H.264/AVC video encoder and decoder running over TCP, reducing network bandwidth from ~30-40 Mbps to 3-5 Mbps (~85% reduction), drastically lowering heating and power consumption. User can toggle between MJPEG and H.264 anytime in the UI.
 
 ---
 

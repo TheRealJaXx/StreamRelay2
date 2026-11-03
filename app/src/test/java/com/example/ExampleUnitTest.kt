@@ -29,4 +29,12 @@ class ExampleUnitTest {
     assertEquals(720, com.example.relay.LatencyTestEngine.HEIGHT)
     assertEquals(3840, com.example.relay.LatencyTestEngine.AUDIO_CHUNK_BYTES)
   }
+
+  @Test
+  fun testVideoCodecValues() {
+    val codecs = com.example.ui.VideoCodec.values()
+    assertEquals(2, codecs.size)
+    assertTrue(codecs.contains(com.example.ui.VideoCodec.MJPEG))
+    assertTrue(codecs.contains(com.example.ui.VideoCodec.H264))
+  }
 }

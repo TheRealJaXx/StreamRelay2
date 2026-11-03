@@ -2,6 +2,7 @@ package com.example.ui
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Bitmap
 import android.view.Surface
 import android.view.SurfaceHolder
 import androidx.lifecycle.AndroidViewModel
@@ -33,7 +34,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-import android.graphics.Bitmap
+import com.example.relay.HardwareH264Encoder
 import com.example.relay.LatencyTestEngine
 
 enum class AppMode {
@@ -47,6 +48,11 @@ enum class AppMode {
 enum class RoundTripSource {
     TEST_PATTERN,
     HDMI_CAPTURE
+}
+
+enum class VideoCodec(val label: String, val description: String) {
+    MJPEG("MJPEG (Direct Frames)", "Full resolution, uncompressed JPEG stream (30-40 Mbps)"),
+    H264("H.264 (Hardware AVC)", "Hardware encoded, 85% lower bandwidth (3-5 Mbps), less heating")
 }
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
@@ -113,6 +119,25 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         addLog(tag, message, isError)
     }
 
+    // Hardware H.264 Codec encoder instance
+    private var h264Encoder: HardwareH264Encoder? = null
+
+    // Video Codec Preference
+    private val _videoCodec = MutableStateFlow(
+        if (prefs.getString("pref_codec", "MJPEG") == "H264") VideoCodec.H264 else VideoCodec.MJPEG
+    )
+    val videoCodec: StateFlow<VideoCodec> = _videoCodec.asStateFlow()
+
+    fun setVideoCodec(codec: VideoCodec) {
+        _videoCodec.value = codec
+        prefs.edit().putString("pref_codec", codec.name).apply()
+        addLog("System", "Video codec set to: ${codec.label}", false)
+        if (codec == VideoCodec.MJPEG) {
+            try { h264Encoder?.release() } catch (_: Exception) {}
+            h264Encoder = null
+        }
+    }
+
     val isBackgroundServiceArmed: StateFlow<Boolean> = RelayServerService.isServiceActive
 
     // Capture Card Audio Engine (TX) - Captures USB Audio & plays through phone speaker
@@ -168,7 +193,20 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     val latencyTestEngine = LatencyTestEngine(
         onFrameGenerated = { jpegBytes ->
             relayServer.recordFrameCaptured()
-            relayServer.submitFrame(jpegBytes)
+            if (_videoCodec.value == VideoCodec.H264) {
+                if (h264Encoder == null) {
+                    h264Encoder = HardwareH264Encoder(
+                        width = 1280,
+                        height = 720,
+                        targetFps = _testFps.value
+                    ) { nalData, _ ->
+                        relayServer.submitFrame(nalData, nalData.size, flags = 1)
+                    }.also { it.start() }
+                }
+                h264Encoder?.encodeJpeg(jpegBytes, jpegBytes.size)
+            } else {
+                relayServer.submitFrame(jpegBytes, jpegBytes.size, flags = 0)
+            }
         },
         onAudioChunkGenerated = { pcmBytes ->
             relayServer.submitAudio(pcmBytes)
@@ -210,19 +248,42 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         uvcCaptureEngine.onRawFrameCapturedWithRelease = { rawBytes, sizeBytes, releaseAction ->
             relayServer.recordFrameCaptured()
 
+            val isH264 = _videoCodec.value == VideoCodec.H264
             val isJpeg = sizeBytes >= 2 &&
                 (rawBytes[0].toInt() and 0xFF) == 0xFF && (rawBytes[1].toInt() and 0xFF) == 0xD8
 
-            if (isJpeg) {
-                relayServer.submitFrame(rawBytes, sizeBytes, releaseAction)
-            } else {
-                val telem = telemetry.value
-                val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
-                val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
-                val compressed = JpegUtils.compressYuvToJpeg(rawBytes.copyOf(sizeBytes), w, h, quality = 80)
+            if (isH264) {
+                if (h264Encoder == null) {
+                    val telem = telemetry.value
+                    val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else _selectedPreset.value.width
+                    val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else _selectedPreset.value.height
+                    h264Encoder = HardwareH264Encoder(
+                        width = w,
+                        height = h,
+                        targetFps = _selectedPreset.value.targetFps
+                    ) { nalData, _ ->
+                        relayServer.submitFrame(nalData, nalData.size, flags = 1)
+                    }.also { it.start() }
+                }
+
+                if (isJpeg) {
+                    h264Encoder?.encodeJpeg(rawBytes, sizeBytes)
+                } else {
+                    h264Encoder?.encodeYuv(rawBytes, sizeBytes)
+                }
                 releaseAction()
-                if (compressed != null) {
-                    relayServer.submitFrame(compressed, compressed.size)
+            } else {
+                if (isJpeg) {
+                    relayServer.submitFrame(rawBytes, sizeBytes, flags = 0, onWritten = releaseAction)
+                } else {
+                    val telem = telemetry.value
+                    val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
+                    val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
+                    val compressed = JpegUtils.compressYuvToJpeg(rawBytes.copyOf(sizeBytes), w, h, quality = 80)
+                    releaseAction()
+                    if (compressed != null) {
+                        relayServer.submitFrame(compressed, compressed.size, flags = 0)
+                    }
                 }
             }
         }
@@ -496,6 +557,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     fun stopTxRelayServer() {
         relayServer.stop()
         audioCaptureEngine.stop()
+        try { h264Encoder?.release() } catch (_: Exception) {}
+        h264Encoder = null
         RelayServerService.stop(getApplication())
     }
 

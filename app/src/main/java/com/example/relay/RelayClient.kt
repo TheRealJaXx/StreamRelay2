@@ -65,7 +65,8 @@ data class RxStats(
     val rttP95Ms: Float = 0f,
     val audioUnderrunCount: Int = 0,
     val frameSizeBytes: Int = 0,
-    val statusDetail: String = "Disconnected"
+    val statusDetail: String = "Disconnected",
+    val videoCodec: String = "MJPEG"
 )
 
 class RelayClient(
@@ -185,11 +186,32 @@ class RelayClient(
         _audioDelayMs.value = delayMs.coerceIn(0, 200)
     }
 
+    // Surface & Hardware H.264 Decoder
+    private var attachedSurfaceHolder: SurfaceHolder? = null
+    private var h264Decoder: HardwareH264Decoder? = null
+    private var activeVideoCodec = "MJPEG"
+    private var h264FrameCountInSecond = 0
+    private var h264Fps = 0f
+    private var lastH264FpsCalcTime = SystemClock.elapsedRealtime()
+    private var lastH264FrameSizeBytes = 0
+
     fun attachSurface(holder: SurfaceHolder) {
+        attachedSurfaceHolder = holder
         mjpegPlayer.attachSurface(holder)
+        if (activeVideoCodec == "H.264" && holder.surface.isValid) {
+            try {
+                h264Decoder?.release()
+                h264Decoder = HardwareH264Decoder(1280, 720, holder.surface).also { it.start() }
+            } catch (e: Exception) {
+                onLog("RX-Relay", "Error attaching H.264 surface: ${e.message}", true)
+            }
+        }
     }
 
     fun detachSurface(holder: SurfaceHolder? = null) {
+        attachedSurfaceHolder = null
+        try { h264Decoder?.release() } catch (_: Exception) {}
+        h264Decoder = null
         mjpegPlayer.detachSurface()
     }
 
@@ -243,6 +265,8 @@ class RelayClient(
         isVideoSocketConnected = false
         isAudioSocketConnected = false
 
+        try { h264Decoder?.release() } catch (_: Exception) {}
+        h264Decoder = null
         releaseAudioTrack()
 
         synchronized(audioJitterLock) {
@@ -302,18 +326,42 @@ class RelayClient(
                     }
 
                     val seq = inputStream.readInt()
-                    val flags = inputStream.readInt() // flags (0)
-
-                    val buffer = mjpegPlayer.acquireBuffer(length)
-                    inputStream.readFully(buffer, 0, length)
+                    val flags = inputStream.readInt() // 0 = MJPEG, 1 = H.264
 
                     val arrivalNs = System.nanoTime()
                     videoPacketsCount++
                     videoBytesCounter += length + 16
                     lastVideoPacketTimestamp = SystemClock.elapsedRealtime()
 
-                    // Hand to MjpegPlayer (latest-frame-wins, kernel buffer always drains, no ACK idling)
-                    mjpegPlayer.submit(buffer, length, seq, arrivalNs)
+                    if (flags == 1) {
+                        activeVideoCodec = "H.264"
+                        h264FrameCountInSecond++
+                        lastH264FrameSizeBytes = length
+                        val nal = ByteArray(length)
+                        inputStream.readFully(nal, 0, length)
+
+                        val holder = attachedSurfaceHolder
+                        if (holder != null && holder.surface.isValid) {
+                            if (h264Decoder == null) {
+                                try {
+                                    h264Decoder = HardwareH264Decoder(1280, 720, holder.surface).also { it.start() }
+                                    onLog("RX-Relay", "Hardware H.264 Decoder engaged for direct surface render", false)
+                                } catch (e: Exception) {
+                                    onLog("RX-Relay", "Failed to start H.264 decoder: ${e.message}", true)
+                                }
+                            }
+                            h264Decoder?.decodeNal(nal)
+                        }
+                    } else {
+                        activeVideoCodec = "MJPEG"
+                        if (h264Decoder != null) {
+                            try { h264Decoder?.release() } catch (_: Exception) {}
+                            h264Decoder = null
+                        }
+                        val buffer = mjpegPlayer.acquireBuffer(length)
+                        inputStream.readFully(buffer, 0, length)
+                        mjpegPlayer.submit(buffer, length, seq, arrivalNs)
+                    }
                 }
             } catch (e: SocketTimeoutException) {
                 statusDetailMessage = "Connect timed out (wrong IP / different network / client isolation)"
@@ -608,6 +656,14 @@ class RelayClient(
             lastBytesSecondTimestamp = now
         }
 
+        val isH264 = activeVideoCodec == "H.264"
+        if (now - lastH264FpsCalcTime >= 1000L) {
+            val elapsed = (now - lastH264FpsCalcTime) / 1000f
+            h264Fps = if (elapsed > 0f) h264FrameCountInSecond / elapsed else 0f
+            h264FrameCountInSecond = 0
+            lastH264FpsCalcTime = now
+        }
+
         val sinceLastVideo = if (lastVideoPacketTimestamp > 0L) {
             (now - lastVideoPacketTimestamp) / 1000f
         } else 0f
@@ -618,18 +674,22 @@ class RelayClient(
             try { audioTrack?.underrunCount ?: 0 } catch (_: Exception) { 0 }
         } else 0
 
+        val effectiveFps = if (isH264) ((h264Fps * 10f).let { Math.round(it) / 10f }) else playerStats.fps
+        val effectiveFrameSize = if (isH264) lastH264FrameSizeBytes else playerStats.lastFrameSizeBytes
+        val effectiveResolution = if (isH264) "720p (H.264)" else if (playerStats.resolution.isNotEmpty()) playerStats.resolution else "--"
+
         _stats.value = RxStats(
             videoPacketsReceived = videoPacketsCount,
             videoBytesPerSecond = currentBytesPerSec,
             audioPacketsReceived = audioPacketsCount,
             secondsSinceLastVideoPacket = (sinceLastVideo * 10f).let { Math.round(it) / 10f },
-            decodeSuccesses = playerStats.decodeSuccessCount,
+            decodeSuccesses = if (isH264) videoPacketsCount else playerStats.decodeSuccessCount,
             decodeFailures = playerStats.decodeFailureCount,
             lastDecodeError = playerStats.lastError ?: "None",
             lastFrameFirst4BytesHex = if (playerStats.lastHex4.isNotEmpty()) playerStats.lastHex4 else "--",
             lastFrameEndsEoi = playerStats.lastEndsEoi,
-            decodedBitmapSize = if (playerStats.resolution.isNotEmpty()) playerStats.resolution else "--",
-            fps = playerStats.fps,
+            decodedBitmapSize = effectiveResolution,
+            fps = effectiveFps,
             decodeTimeMs = playerStats.decodeTimeMsAvg.toLong(),
             decodeTimeMsAvg = playerStats.decodeTimeMsAvg,
             decodeTimeMsMax = playerStats.decodeTimeMsMax,
@@ -639,8 +699,9 @@ class RelayClient(
             rttAvgMs = rttAvgMs,
             rttP95Ms = rttP95Ms,
             audioUnderrunCount = underruns,
-            frameSizeBytes = playerStats.lastFrameSizeBytes,
-            statusDetail = statusDetailMessage
+            frameSizeBytes = effectiveFrameSize,
+            statusDetail = statusDetailMessage,
+            videoCodec = activeVideoCodec
         )
     }
 

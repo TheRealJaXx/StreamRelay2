@@ -38,7 +38,8 @@ data class TxRelayStats(
     val isClientConnected: Boolean = false,
     val connectedClientsCount: Int = 0,
     val audioChunksCaptured: Long = 0L,
-    val audioChunksSent: Long = 0L
+    val audioChunksSent: Long = 0L,
+    val activeCodec: String = "MJPEG"
 )
 
 class RelayServer(
@@ -79,6 +80,7 @@ class RelayServer(
         val data: ByteArray,
         val size: Int,
         val sequenceNumber: Int,
+        val flags: Int = 0,
         val onWritten: (() -> Unit)? = null
     )
 
@@ -124,6 +126,7 @@ class RelayServer(
     private var audioSentCount = 0L
 
     private var lastFrameSize = 0
+    private var lastFlags = 0
     private var lastStartsSoi = false
     private var lastEndsEoi = false
     private var lastStatsUpdateTime = 0L
@@ -318,7 +321,7 @@ class RelayServer(
                             outputStream.writeInt(VIDEO_FRAME_MAGIC)
                             outputStream.writeInt(frame.size)
                             outputStream.writeInt(frame.sequenceNumber)
-                            outputStream.writeInt(0) // flags
+                            outputStream.writeInt(frame.flags) // 0 = MJPEG, 1 = H.264
                             outputStream.write(frame.data, 0, frame.size)
                             outputStream.flush()
                             val writeDurationNs = System.nanoTime() - writeStartNs
@@ -434,14 +437,20 @@ class RelayServer(
         maybeUpdateStats()
     }
 
-    fun submitFrame(jpegBytes: ByteArray, size: Int = jpegBytes.size, onWritten: (() -> Unit)? = null) {
+    fun submitFrame(
+        frameBytes: ByteArray,
+        size: Int = frameBytes.size,
+        flags: Int = 0,
+        onWritten: (() -> Unit)? = null
+    ) {
         framesSubmittedCount++
         lastFrameSize = size
+        lastFlags = flags
         val seq = videoSeqCounter.incrementAndGet()
 
-        if (size >= 2) {
-            lastStartsSoi = (jpegBytes[0].toInt() and 0xFF) == 0xFF && (jpegBytes[1].toInt() and 0xFF) == 0xD8
-            lastEndsEoi = (jpegBytes[size - 2].toInt() and 0xFF) == 0xFF && (jpegBytes[size - 1].toInt() and 0xFF) == 0xD9
+        if (flags == 0 && size >= 2) {
+            lastStartsSoi = (frameBytes[0].toInt() and 0xFF) == 0xFF && (frameBytes[1].toInt() and 0xFF) == 0xD8
+            lastEndsEoi = (frameBytes[size - 2].toInt() and 0xFF) == 0xFF && (frameBytes[size - 1].toInt() and 0xFF) == 0xD9
         } else {
             lastStartsSoi = false
             lastEndsEoi = false
@@ -458,7 +467,7 @@ class RelayServer(
 
         val session = currentVideoSession
         if (session != null && session.job.isActive && !session.socket.isClosed && isRunning.get()) {
-            val payload = VideoFramePayload(jpegBytes, size, seq, onWritten)
+            val payload = VideoFramePayload(frameBytes, size, seq, flags, onWritten)
             val sent = session.channel.trySend(payload)
             if (!sent.isSuccess) {
                 onWritten?.invoke()
@@ -495,7 +504,8 @@ class RelayServer(
                 isClientConnected = isConn,
                 connectedClientsCount = if (isConn) 1 else 0,
                 audioChunksCaptured = audioCapturedCount,
-                audioChunksSent = audioSentCount
+                audioChunksSent = audioSentCount,
+                activeCodec = if (lastFlags == 1) "H.264" else "MJPEG"
             )
         }
     }

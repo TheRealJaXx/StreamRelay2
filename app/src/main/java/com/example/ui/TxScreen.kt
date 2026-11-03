@@ -111,6 +111,7 @@ fun TxScreen(
     val connectedClientAddress by viewModel.txConnectedClientAddress.collectAsStateWithLifecycle()
     val publishedStreamName = viewModel.publishedStreamName
     val isBackgroundServiceArmed by viewModel.isBackgroundServiceArmed.collectAsStateWithLifecycle()
+    val videoCodec by viewModel.videoCodec.collectAsStateWithLifecycle()
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -174,10 +175,12 @@ fun TxScreen(
                 )
             }
 
-            // Screen-Lock Background Status
+            // Screen-Lock Background Status & Video Codec Configuration
             item {
-                TxScreenLockStatusCard(
-                    isBackgroundArmed = isBackgroundServiceArmed
+                TxStreamConfigCard(
+                    isBackgroundArmed = isBackgroundServiceArmed,
+                    videoCodec = videoCodec,
+                    onSelectCodec = { viewModel.setVideoCodec(it) }
                 )
             }
 
@@ -876,6 +879,13 @@ private fun TxRelayDiagnosticsCard(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     Text(
+                        text = "Active Video Codec: ${txStats.activeCodec} over TCP",
+                        color = Color(0xFFFBBF24),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
                         text = "Frames Captured: ${txStats.framesCaptured}  |  Submitted: ${txStats.framesSubmitted}",
                         color = Color(0xFF38BDF8),
                         style = MaterialTheme.typography.labelSmall,
@@ -1100,8 +1110,10 @@ private fun TxPreviewMonitorCard(
 }
 
 @Composable
-private fun TxScreenLockStatusCard(
-    isBackgroundArmed: Boolean
+private fun TxStreamConfigCard(
+    isBackgroundArmed: Boolean,
+    videoCodec: VideoCodec,
+    onSelectCodec: (VideoCodec) -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1112,7 +1124,8 @@ private fun TxScreenLockStatusCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -1146,6 +1159,39 @@ private fun TxScreenLockStatusCard(
                         )
                     }
                 }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "Video Encoding Codec",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    VideoCodec.entries.forEach { codec ->
+                        FilterChip(
+                            selected = videoCodec == codec,
+                            onClick = { onSelectCodec(codec) },
+                            label = {
+                                Text(
+                                    text = if (codec == VideoCodec.H264) "H.264 (Hardware AVC)" else "MJPEG (Direct)"
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedLabelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        )
+                    }
+                }
+                Text(
+                    text = videoCodec.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
