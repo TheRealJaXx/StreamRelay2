@@ -133,8 +133,38 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
         prefs.edit().putString("pref_codec", codec.name).apply()
         addLog("System", "Video codec set to: ${codec.label}", false)
         if (codec == VideoCodec.MJPEG) {
+            uvcCaptureEngine.setEncoderSurface(null)
             try { h264Encoder?.release() } catch (_: Exception) {}
             h264Encoder = null
+        } else {
+            ensureH264Encoder()
+        }
+    }
+
+    private fun ensureH264Encoder(): HardwareH264Encoder? {
+        val current = h264Encoder
+        if (current != null) return current
+        val telem = telemetry.value
+        val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else _selectedPreset.value.width
+        val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else _selectedPreset.value.height
+        val fps = _selectedPreset.value.targetFps
+
+        val enc = HardwareH264Encoder(
+            width = w,
+            height = h,
+            targetFps = fps
+        ) { nalData, _ ->
+            relayServer.submitFrame(nalData, nalData.size, flags = 1)
+        }
+        if (enc.start()) {
+            h264Encoder = enc
+            uvcCaptureEngine.setEncoderSurface(enc.inputSurface)
+            addLog("Encoder", "Hardware H.264 Surface Encoder engaged (${w}x${h} @ ${fps}fps)", false)
+            return enc
+        } else {
+            addLog("Encoder", "Failed to start hardware H.264 encoder, falling back to MJPEG", true)
+            _videoCodec.value = VideoCodec.MJPEG
+            return null
         }
     }
 
@@ -190,31 +220,28 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     }
 
     // Hardware-Free Latency Test Pattern Engine (TX)
-    val latencyTestEngine = LatencyTestEngine(
-        onFrameGenerated = { jpegBytes ->
-            relayServer.recordFrameCaptured()
-            if (_videoCodec.value == VideoCodec.H264) {
-                if (h264Encoder == null) {
-                    h264Encoder = HardwareH264Encoder(
-                        width = 1280,
-                        height = 720,
-                        targetFps = _testFps.value
-                    ) { nalData, _ ->
-                        relayServer.submitFrame(nalData, nalData.size, flags = 1)
-                    }.also { it.start() }
+    val latencyTestEngine: LatencyTestEngine by lazy {
+        LatencyTestEngine(
+            onFrameGenerated = { jpegBytes ->
+                relayServer.recordFrameCaptured()
+                if (_videoCodec.value == VideoCodec.H264) {
+                    val enc = ensureH264Encoder()
+                    val bmp = latencyTestEngine.currentBitmap.value
+                    if (bmp != null) {
+                        enc?.renderBitmap(bmp)
+                    }
+                } else {
+                    relayServer.submitFrame(jpegBytes, jpegBytes.size, flags = 0)
                 }
-                h264Encoder?.encodeJpeg(jpegBytes, jpegBytes.size)
-            } else {
-                relayServer.submitFrame(jpegBytes, jpegBytes.size, flags = 0)
+            },
+            onAudioChunkGenerated = { pcmBytes ->
+                relayServer.submitAudio(pcmBytes)
             }
-        },
-        onAudioChunkGenerated = { pcmBytes ->
-            relayServer.submitAudio(pcmBytes)
-        }
-    )
+        )
+    }
 
-    val testPatternBitmap: StateFlow<Bitmap?> = latencyTestEngine.currentBitmap
-    val testFramesGenerated: StateFlow<Long> = latencyTestEngine.framesGenerated
+    val testPatternBitmap: StateFlow<Bitmap?> get() = latencyTestEngine.currentBitmap
+    val testFramesGenerated: StateFlow<Long> get() = latencyTestEngine.framesGenerated
 
     private val _testFps = MutableStateFlow(prefs.getInt("pref_test_fps", 60))
     val testFps: StateFlow<Int> = _testFps.asStateFlow()
@@ -225,6 +252,17 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     // Local Video Preview toggle on Transmitter (TX)
     private val _isLocalPreviewEnabled = MutableStateFlow(false)
     val isLocalPreviewEnabled: StateFlow<Boolean> = _isLocalPreviewEnabled.asStateFlow()
+
+    // Full Screen Preview on Transmitter (TX)
+    private val _isTxFullScreenPreview = MutableStateFlow(false)
+    val isTxFullScreenPreview: StateFlow<Boolean> = _isTxFullScreenPreview.asStateFlow()
+
+    fun setTxFullScreenPreview(enabled: Boolean) {
+        _isTxFullScreenPreview.value = enabled
+        if (enabled && !_isLocalPreviewEnabled.value) {
+            setLocalPreviewEnabled(true)
+        }
+    }
 
     // Send 30 fps toggle on Transmitter (TX)
     private val _isSend30FpsEnabled = MutableStateFlow(prefs.getBoolean("pref_tx_send_30_fps", false))
@@ -253,24 +291,8 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 (rawBytes[0].toInt() and 0xFF) == 0xFF && (rawBytes[1].toInt() and 0xFF) == 0xD8
 
             if (isH264) {
-                if (h264Encoder == null) {
-                    val telem = telemetry.value
-                    val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else _selectedPreset.value.width
-                    val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else _selectedPreset.value.height
-                    h264Encoder = HardwareH264Encoder(
-                        width = w,
-                        height = h,
-                        targetFps = _selectedPreset.value.targetFps
-                    ) { nalData, _ ->
-                        relayServer.submitFrame(nalData, nalData.size, flags = 1)
-                    }.also { it.start() }
-                }
-
-                if (isJpeg) {
-                    h264Encoder?.encodeJpeg(rawBytes, sizeBytes)
-                } else {
-                    h264Encoder?.encodeYuv(rawBytes, sizeBytes)
-                }
+                // In H.264 mode, the video is decoded directly to the encoder's input surface by UVCAndroid.
+                ensureH264Encoder()
                 releaseAction()
             } else {
                 if (isJpeg) {
@@ -557,6 +579,7 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
     fun stopTxRelayServer() {
         relayServer.stop()
         audioCaptureEngine.stop()
+        uvcCaptureEngine.setEncoderSurface(null)
         try { h264Encoder?.release() } catch (_: Exception) {}
         h264Encoder = null
         RelayServerService.stop(getApplication())

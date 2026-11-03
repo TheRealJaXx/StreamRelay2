@@ -2,6 +2,14 @@ package com.example.ui
 
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import com.example.model.StreamPreset
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -112,6 +120,20 @@ fun TxScreen(
     val publishedStreamName = viewModel.publishedStreamName
     val isBackgroundServiceArmed by viewModel.isBackgroundServiceArmed.collectAsStateWithLifecycle()
     val videoCodec by viewModel.videoCodec.collectAsStateWithLifecycle()
+    val isTxFullScreenPreview by viewModel.isTxFullScreenPreview.collectAsStateWithLifecycle()
+
+    if (isTxFullScreenPreview) {
+        TxFullScreenPreviewView(
+            telemetry = telemetry,
+            selectedPreset = selectedPreset,
+            videoCodec = videoCodec,
+            connectedClients = connectedClients,
+            onExitFullScreen = { viewModel.setTxFullScreenPreview(false) },
+            onSurfaceHolderCreated = { viewModel.setLocalPreviewHolder(it) },
+            onSelectCodec = { viewModel.setVideoCodec(it) }
+        )
+        return
+    }
 
     val uvcDevice = usbDevices.firstOrNull { it.isUvcVideo } ?: usbDevices.firstOrNull()
 
@@ -192,6 +214,7 @@ fun TxScreen(
                     telemetry = telemetry,
                     isSend30FpsEnabled = isSend30FpsEnabled,
                     onTogglePreview = { viewModel.setLocalPreviewEnabled(it) },
+                    onEnterFullScreen = { viewModel.setTxFullScreenPreview(true) },
                     onToggleSend30Fps = { viewModel.setSend30FpsEnabled(it) },
                     onSelectPreset = { viewModel.selectPreset(it) },
                     availablePresets = viewModel.availablePresets,
@@ -929,6 +952,7 @@ private fun TxPreviewMonitorCard(
     telemetry: com.example.model.CaptureTelemetry,
     isSend30FpsEnabled: Boolean,
     onTogglePreview: (Boolean) -> Unit,
+    onEnterFullScreen: () -> Unit,
     onToggleSend30Fps: (Boolean) -> Unit,
     onSelectPreset: (com.example.model.StreamPreset) -> Unit,
     availablePresets: List<com.example.model.StreamPreset>,
@@ -975,11 +999,25 @@ private fun TxPreviewMonitorCard(
                     }
                 }
 
-                Switch(
-                    checked = isLocalPreviewEnabled,
-                    onCheckedChange = onTogglePreview,
-                    modifier = Modifier.testTag("tx_preview_switch")
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (isLocalPreviewEnabled) {
+                        IconButton(
+                            onClick = onEnterFullScreen,
+                            modifier = Modifier.testTag("enter_fullscreen_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Fullscreen,
+                                contentDescription = "Enter full screen preview",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = isLocalPreviewEnabled,
+                        onCheckedChange = onTogglePreview,
+                        modifier = Modifier.testTag("tx_preview_switch")
+                    )
+                }
             }
 
             // Stream Resolution & FPS Presets (Select 720p30 vs 720p60)
@@ -1103,6 +1141,27 @@ private fun TxPreviewMonitorCard(
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }
+
+                    // Full-screen expand icon overlay button
+                    IconButton(
+                        onClick = onEnterFullScreen,
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .testTag("viewport_fullscreen_button")
+                    ) {
+                        Surface(
+                            shape = CircleShape,
+                            color = Color.Black.copy(alpha = 0.6f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Fullscreen,
+                                contentDescription = "Expand to Full Screen",
+                                tint = Color.White,
+                                modifier = Modifier.padding(6.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1196,5 +1255,144 @@ private fun TxStreamConfigCard(
         }
     }
 }
+
+@Composable
+private fun TxFullScreenPreviewView(
+    telemetry: CaptureTelemetry,
+    selectedPreset: StreamPreset,
+    videoCodec: VideoCodec,
+    connectedClients: Int,
+    onExitFullScreen: () -> Unit,
+    onSurfaceHolderCreated: (SurfaceHolder?) -> Unit,
+    onSelectCodec: (VideoCodec) -> Unit
+) {
+    BackHandler {
+        onExitFullScreen()
+    }
+
+    var showControls by remember { mutableStateOf(true) }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .clickable { showControls = !showControls }
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                SurfaceView(ctx).apply {
+                    holder.addCallback(object : SurfaceHolder.Callback {
+                        override fun surfaceCreated(h: SurfaceHolder) {
+                            onSurfaceHolderCreated(h)
+                        }
+                        override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {
+                            onSurfaceHolderCreated(h)
+                        }
+                        override fun surfaceDestroyed(h: SurfaceHolder) {
+                            onSurfaceHolderCreated(null)
+                        }
+                    })
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
+
+        AnimatedVisibility(
+            visible = showControls,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                // Top controls bar
+                Surface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        .padding(16.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color.Black.copy(alpha = 0.75f),
+                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.2f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(
+                                onClick = onExitFullScreen,
+                                modifier = Modifier.testTag("exit_fullscreen_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FullscreenExit,
+                                    contentDescription = "Exit Full Screen",
+                                    tint = Color.White
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Transmitter Full-Screen Monitor",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Text(
+                                    text = "Decoded preview streaming · ${if (telemetry.isStreaming) "${telemetry.fps} fps" else "Capture active"}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF38BDF8)
+                                )
+                            }
+                        }
+
+                        // Codec Switcher in Full Screen
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(
+                                selected = videoCodec == VideoCodec.H264,
+                                onClick = { onSelectCodec(VideoCodec.H264) },
+                                label = { Text("H.264") },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFF10B981).copy(alpha = 0.3f),
+                                    selectedLabelColor = Color(0xFF34D399),
+                                    labelColor = Color.White
+                                )
+                            )
+                            FilterChip(
+                                selected = videoCodec == VideoCodec.MJPEG,
+                                onClick = { onSelectCodec(VideoCodec.MJPEG) },
+                                label = { Text("MJPEG") },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Color(0xFF38BDF8).copy(alpha = 0.3f),
+                                    selectedLabelColor = Color(0xFF38BDF8),
+                                    labelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+                }
+
+                // Bottom badge
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp),
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.Black.copy(alpha = 0.7f)
+                ) {
+                    Text(
+                        text = "Tap screen to hide controls · Connected Clients: $connectedClients · ${videoCodec.label}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.8f),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
 
 

@@ -1,19 +1,25 @@
 package com.example.relay
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
+import android.graphics.Rect
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import java.nio.ByteBuffer
 
 /**
- * Android MediaCodec Hardware H.264 Encoder & Decoder.
- * Cuts network bandwidth by ~85% (from 30-40 Mbps MJPEG down to 3-5 Mbps H.264)
- * to drastically reduce mobile device heating and thermal throttling.
+ * Android MediaCodec Hardware H.264 Surface-Direct Encoder & Decoder.
+ *
+ * Uses MediaCodec with COLOR_FormatSurface (inputSurface):
+ * - Zero CPU copying: UVCAndroid's native OpenGL engine renders decoded capture card
+ *   frames directly to inputSurface.
+ * - Hardware GPU/VPU compresses at full 60/30 FPS at 4 Mbps target bitrate.
+ * - Pre-caches SPS and PPS headers (BUFFER_FLAG_CODEC_CONFIG) and prepends them
+ *   to every IDR keyframe so the receiving phone can instantly initialize and decode.
  */
 class HardwareH264Encoder(
     private val width: Int = 1280,
@@ -23,25 +29,26 @@ class HardwareH264Encoder(
     private val onEncodedFrame: (data: ByteArray, isKeyframe: Boolean) -> Unit
 ) {
     private var mediaCodec: MediaCodec? = null
-    private var isRunning = false
-    private var frameIndex = 0L
+    var inputSurface: Surface? = null
+        private set
 
-    private var cachedNv12 = ByteArray(width * height * 3 / 2)
-    private var cachedPixels = IntArray(width * height)
-    private val decodeOptions = BitmapFactory.Options().apply {
-        inPreferredConfig = Bitmap.Config.RGB_565
-        inMutable = true
-    }
+    @Volatile
+    private var isRunning = false
+    private var drainThread: Thread? = null
+
+    // Cached SPS & PPS codec configuration to prepend to IDR keyframes
+    @Volatile
+    private var spsPpsConfig: ByteArray? = null
 
     companion object {
-        private const val TAG = "H264Encoder"
+        private const val TAG = "H264SurfaceEncoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
     }
 
     fun start(): Boolean {
         try {
             val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar)
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
                 setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second keyframe interval
@@ -54,162 +61,170 @@ class HardwareH264Encoder(
 
             val encoder = MediaCodec.createEncoderByType(MIME_TYPE)
             encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            inputSurface = encoder.createInputSurface()
             encoder.start()
             mediaCodec = encoder
             isRunning = true
-            Log.d(TAG, "Hardware H.264 Encoder initialized: ${width}x${height} @ ${targetFps}fps ($bitrateBps bps)")
+
+            // Dedicated background thread to drain encoded H.264 NAL units
+            drainThread = Thread({
+                drainLoop()
+            }, "H264EncoderDrain").apply {
+                priority = Thread.MAX_PRIORITY
+                start()
+            }
+
+            Log.d(TAG, "Hardware H.264 Surface Encoder initialized: ${width}x${height} @ ${targetFps}fps ($bitrateBps bps)")
             return true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start H.264 hardware encoder: ${e.message}", e)
+            Log.e(TAG, "Failed to start H.264 hardware surface encoder: ${e.message}", e)
             return false
         }
     }
 
-    fun encodeJpeg(jpegBytes: ByteArray, size: Int = jpegBytes.size) {
-        if (!isRunning || size <= 0) return
-        try {
-            val bmp = BitmapFactory.decodeByteArray(jpegBytes, 0, size, decodeOptions)
-            if (bmp != null) {
-                encodeBitmap(bmp)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error decoding JPEG for H.264 encode: ${e.message}")
-        }
-    }
-
-    fun encodeBitmap(bitmap: Bitmap) {
-        val encoder = mediaCodec ?: return
+    /**
+     * Fallback for synthetic Bitmaps (e.g. LatencyTestEngine):
+     * Draws bitmap directly to hardware inputSurface via Canvas without CPU pixel loops.
+     */
+    fun renderBitmap(bitmap: Bitmap) {
+        val surface = inputSurface ?: return
         if (!isRunning) return
 
         try {
-            val w = minOf(width, bitmap.width)
-            val h = minOf(height, bitmap.height)
-            val totalPixels = w * h
-            if (cachedPixels.size < totalPixels) {
-                cachedPixels = IntArray(totalPixels)
+            val canvas = surface.lockCanvas(null)
+            if (canvas != null) {
+                try {
+                    val destRect = Rect(0, 0, width, height)
+                    canvas.drawBitmap(bitmap, null, destRect, null)
+                } finally {
+                    surface.unlockCanvasAndPost(canvas)
+                }
             }
-            bitmap.getPixels(cachedPixels, 0, w, 0, 0, w, h)
-
-            val nv12Size = (w * h * 3) / 2
-            if (cachedNv12.size < nv12Size) {
-                cachedNv12 = ByteArray(nv12Size)
-            }
-            rgbToNv12(cachedPixels, cachedNv12, w, h)
-            encodeYuv(cachedNv12, nv12Size)
         } catch (e: Exception) {
-            Log.e(TAG, "Error in encodeBitmap: ${e.message}")
+            Log.e(TAG, "Error rendering bitmap to H.264 input surface: ${e.message}")
         }
     }
 
-    fun encodeYuv(yuvData: ByteArray, size: Int = yuvData.size) {
-        val encoder = mediaCodec ?: return
-        if (!isRunning || size <= 0) return
-
-        try {
-            val inputIndex = encoder.dequeueInputBuffer(10_000L) // 10ms timeout
-            if (inputIndex >= 0) {
-                val inputBuffer: ByteBuffer? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    encoder.getInputBuffer(inputIndex)
-                } else {
-                    @Suppress("DEPRECATION")
-                    encoder.inputBuffers[inputIndex]
-                }
-
-                if (inputBuffer != null) {
-                    inputBuffer.clear()
-                    val bytesToCopy = minOf(size, inputBuffer.remaining())
-                    inputBuffer.put(yuvData, 0, bytesToCopy)
-
-                    val ptsUs = (frameIndex++ * 1_000_000L / targetFps)
-                    encoder.queueInputBuffer(inputIndex, 0, bytesToCopy, ptsUs, 0)
-                }
-            }
-
-            // Drain output buffers
-            drainEncoder()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error during H.264 encode: ${e.message}")
-        }
-    }
-
-    private fun rgbToNv12(pixels: IntArray, nv12: ByteArray, w: Int, h: Int) {
-        val frameSize = w * h
-        var yIndex = 0
-        var uvIndex = frameSize
-
-        for (j in 0 until h) {
-            for (i in 0 until w) {
-                val color = pixels[j * w + i]
-                val r = (color shr 16) and 0xFF
-                val g = (color shr 8) and 0xFF
-                val b = color and 0xFF
-
-                val y = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
-                nv12[yIndex++] = y.coerceIn(0, 255).toByte()
-
-                if (j % 2 == 0 && i % 2 == 0) {
-                    val u = ((-38 * r - 74 * g + 112 * b + 128) shr 8) + 128
-                    val v = ((112 * r - 94 * g - 18 * b + 128) shr 8) + 128
-                    nv12[uvIndex++] = u.coerceIn(0, 255).toByte()
-                    nv12[uvIndex++] = v.coerceIn(0, 255).toByte()
-                }
-            }
-        }
-    }
-
-    private fun drainEncoder() {
+    private fun drainLoop() {
         val encoder = mediaCodec ?: return
         val bufferInfo = MediaCodec.BufferInfo()
 
         while (isRunning) {
-            val outputIndex = encoder.dequeueOutputBuffer(bufferInfo, 0L)
-            if (outputIndex >= 0) {
-                val outputBuffer: ByteBuffer? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    encoder.getOutputBuffer(outputIndex)
-                } else {
-                    @Suppress("DEPRECATION")
-                    encoder.outputBuffers[outputIndex]
+            try {
+                val outputIndex = encoder.dequeueOutputBuffer(bufferInfo, 10_000L)
+                if (outputIndex >= 0) {
+                    val outputBuffer: ByteBuffer? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        encoder.getOutputBuffer(outputIndex)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        encoder.outputBuffers[outputIndex]
+                    }
+
+                    if (outputBuffer != null && bufferInfo.size > 0) {
+                        outputBuffer.position(bufferInfo.offset)
+                        outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+
+                        val chunk = ByteArray(bufferInfo.size)
+                        outputBuffer.get(chunk)
+
+                        val isConfig = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                        val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+
+                        if (isConfig) {
+                            // Save SPS/PPS headers
+                            spsPpsConfig = chunk.clone()
+                            Log.d(TAG, "Captured H.264 SPS/PPS Config (${chunk.size} bytes)")
+                        } else if (isKeyframe) {
+                            val config = spsPpsConfig
+                            val packetToSend = if (config != null && !startsWithSps(chunk)) {
+                                val combined = ByteArray(config.size + chunk.size)
+                                System.arraycopy(config, 0, combined, 0, config.size)
+                                System.arraycopy(chunk, 0, combined, config.size, chunk.size)
+                                combined
+                            } else {
+                                chunk
+                            }
+                            onEncodedFrame(packetToSend, true)
+                        } else {
+                            onEncodedFrame(chunk, false)
+                        }
+                    }
+                    encoder.releaseOutputBuffer(outputIndex, false)
+                } else if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val newFormat = encoder.outputFormat
+                    Log.d(TAG, "Encoder format updated: $newFormat")
+                    val csd0 = newFormat.getByteBuffer("csd-0")
+                    val csd1 = newFormat.getByteBuffer("csd-1")
+                    if (csd0 != null && csd1 != null) {
+                        val sps = ByteArray(csd0.remaining())
+                        csd0.get(sps)
+                        csd0.rewind()
+                        val pps = ByteArray(csd1.remaining())
+                        csd1.get(pps)
+                        csd1.rewind()
+                        val combined = ByteArray(sps.size + pps.size)
+                        System.arraycopy(sps, 0, combined, 0, sps.size)
+                        System.arraycopy(pps, 0, combined, sps.size, pps.size)
+                        spsPpsConfig = combined
+                        Log.d(TAG, "Captured SPS/PPS from outputFormat csd-0/csd-1 (${combined.size} bytes)")
+                    }
                 }
-
-                if (outputBuffer != null && bufferInfo.size > 0) {
-                    outputBuffer.position(bufferInfo.offset)
-                    outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-
-                    val outBytes = ByteArray(bufferInfo.size)
-                    outputBuffer.get(outBytes)
-
-                    val isKeyframe = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0 ||
-                            (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
-
-                    onEncodedFrame(outBytes, isKeyframe)
+            } catch (e: Exception) {
+                if (isRunning) {
+                    Log.e(TAG, "Error in drainLoop: ${e.message}")
                 }
-                encoder.releaseOutputBuffer(outputIndex, false)
-            } else if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                 break
-            } else if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                Log.d(TAG, "Encoder output format changed: ${encoder.outputFormat}")
             }
         }
     }
 
+    private fun startsWithSps(data: ByteArray): Boolean {
+        if (data.size < 5) return false
+        val nalType = if (data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 0.toByte() && data[3] == 1.toByte()) {
+            data[4].toInt() and 0x1F
+        } else if (data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 1.toByte()) {
+            data[3].toInt() and 0x1F
+        } else {
+            -1
+        }
+        return nalType == 7 // 7 = SPS NAL unit
+    }
+
     fun release() {
         isRunning = false
+        drainThread?.interrupt()
+        try {
+            drainThread?.join(500)
+        } catch (_: Exception) {}
+        drainThread = null
+
         try {
             mediaCodec?.stop()
             mediaCodec?.release()
         } catch (_: Exception) {}
         mediaCodec = null
+
+        try {
+            inputSurface?.release()
+        } catch (_: Exception) {}
+        inputSurface = null
     }
 }
 
+/**
+ * Android MediaCodec Hardware H.264 Decoder.
+ * Direct surface renderer for the receiver.
+ */
 class HardwareH264Decoder(
     private val width: Int = 1280,
     private val height: Int = 720,
     private val surface: Surface
 ) {
     private var mediaCodec: MediaCodec? = null
+    @Volatile
     private var isRunning = false
     private val bufferInfo = MediaCodec.BufferInfo()
+    private var hasConfigured = false
 
     companion object {
         private const val TAG = "H264Decoder"
@@ -223,6 +238,7 @@ class HardwareH264Decoder(
                     setInteger(MediaFormat.KEY_LATENCY, 0)
                 }
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
+                setInteger(MediaFormat.KEY_PUSH_BLANK_BUFFERS_ON_STOP, 1)
             }
 
             val decoder = MediaCodec.createDecoderByType(MIME_TYPE)
@@ -230,7 +246,8 @@ class HardwareH264Decoder(
             decoder.start()
             mediaCodec = decoder
             isRunning = true
-            Log.d(TAG, "Hardware H.264 Decoder started: direct surface render ${width}x${height}")
+            hasConfigured = true
+            Log.d(TAG, "Hardware H.264 Decoder started for direct surface render (${width}x${height})")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start H.264 hardware decoder: ${e.message}", e)
@@ -256,15 +273,18 @@ class HardwareH264Decoder(
                     inputBuffer.clear()
                     val toCopy = minOf(nalData.size, inputBuffer.remaining())
                     inputBuffer.put(nalData, 0, toCopy)
-                    decoder.queueInputBuffer(inputIndex, 0, toCopy, System.nanoTime() / 1000L, 0)
+
+                    val flags = if (isConfigNal(nalData)) MediaCodec.BUFFER_FLAG_CODEC_CONFIG else 0
+                    val ptsUs = SystemClock.elapsedRealtimeNanos() / 1000L
+                    decoder.queueInputBuffer(inputIndex, 0, toCopy, ptsUs, flags)
                 }
             }
 
-            // Release directly to Surface
+            // Immediately drain decoded frame directly to attached SurfaceView
             while (isRunning) {
                 val outputIndex = decoder.dequeueOutputBuffer(bufferInfo, 0L)
                 if (outputIndex >= 0) {
-                    // render = true renders immediately to the attached SurfaceView
+                    // render = true renders instantly onto the hardware Surface
                     decoder.releaseOutputBuffer(outputIndex, true)
                 } else if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) {
                     break
@@ -275,6 +295,18 @@ class HardwareH264Decoder(
         } catch (e: Exception) {
             Log.e(TAG, "Error decoding H.264 NAL: ${e.message}")
         }
+    }
+
+    private fun isConfigNal(data: ByteArray): Boolean {
+        if (data.size < 5) return false
+        val nalType = if (data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 0.toByte() && data[3] == 1.toByte()) {
+            data[4].toInt() and 0x1F
+        } else if (data[0] == 0.toByte() && data[1] == 0.toByte() && data[2] == 1.toByte()) {
+            data[3].toInt() and 0x1F
+        } else {
+            -1
+        }
+        return nalType == 7 || nalType == 8 // SPS or PPS
     }
 
     fun release() {

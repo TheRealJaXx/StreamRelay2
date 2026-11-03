@@ -3,6 +3,7 @@ package com.example.service
 import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.os.SystemClock
+import android.view.Surface
 import com.example.model.CaptureTelemetry
 import com.example.model.StreamPreset
 import com.herohan.uvcapp.CameraException
@@ -39,6 +40,7 @@ class UvcCaptureEngine(
     )
 
     private var currentSurface: Any? = null
+    private var currentEncoderSurface: Surface? = null
     private var activeDevice: UsbDevice? = null
 
     private var frameCountSinceLastMeasure = 0
@@ -197,6 +199,13 @@ class UvcCaptureEngine(
                     } catch (_: Exception) {}
                 }
 
+                currentEncoderSurface?.let {
+                    try {
+                        cameraHelper.addSurface(it, false)
+                        onLog("UVC", "Direct Hardware H.264 encoder surface linked to UVC pipeline", false)
+                    } catch (_: Exception) {}
+                }
+
                 val activeSize = cameraHelper.previewSize
                 val width = activeSize?.width ?: selectedPreset.width
                 val height = activeSize?.height ?: selectedPreset.height
@@ -351,6 +360,24 @@ class UvcCaptureEngine(
                 cameraHelper.addSurface(surface, false)
             } catch (e: Exception) {
                 onLog("UVC", "Error attaching surface: ${e.message}", true)
+            }
+        }
+    }
+
+    fun setEncoderSurface(surface: Surface?) {
+        val old = currentEncoderSurface
+        if (old != null && old != surface) {
+            try {
+                cameraHelper.removeSurface(old)
+            } catch (_: Exception) {}
+        }
+        this.currentEncoderSurface = surface
+        if (surface != null && cameraHelper.isCameraOpened) {
+            try {
+                cameraHelper.addSurface(surface, false)
+                onLog("UVC", "Hardware H.264 encoder surface attached directly to UVC engine", false)
+            } catch (e: Exception) {
+                onLog("UVC", "Error attaching encoder surface: ${e.message}", true)
             }
         }
     }

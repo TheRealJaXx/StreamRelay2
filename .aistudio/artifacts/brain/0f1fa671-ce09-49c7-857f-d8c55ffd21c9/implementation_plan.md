@@ -30,9 +30,10 @@ A comprehensive, low-latency roadmap to keep the transmitter streaming continuou
 ## 2. User Experience & Visual Design
 
 * **Transmitter (TX) Experience:**
+  - **Full-Screen Preview Monitor:** Tap the expand icon on the preview monitor to enter an immersive, edge-to-edge full screen mode. The transmitter phone decodes the capture card with zero latency for local gaming while simultaneously streaming hardware H.264 to the receiver.
   - **Screen Lock Indicator & Thermal Shield:** An active "Background Service Armed" badge in the TX header displays when the foreground service, wake lock, and Wi-Fi locks are verified.
   - **Power-Save Screen Off Hint:** A dedicated banner confirms: *"Safe to lock screen: Relay will run at full performance in background with display powered down to prevent device heating."*
-  - **Transport & Codec Selector:** Clear UI controls to switch between **Sequenced UDP (Ultra Low Latency)** and legacy **TCP (Reliable)**, as well as choosing **H.264 Hardware (Low Heat / Low Bandwidth)** vs **MJPEG (Legacy Raw)**.
+  - **Transport & Codec Selector:** Clear UI controls to switch between **H.264 Hardware (Low Heat / Low Bandwidth)** and **MJPEG (Direct Frames)**.
 * **Receiver (RX) Experience:**
   - **Real-Time Packet Health Bar:** Visual latency indicator showing UDP packet arrival jitter, dropped packet percentage, and instantaneous bitrate.
   - **Seamless Hardware Decoder:** Auto-detects whether the incoming stream is H.264 NAL units or MJPEG, routing directly to `MediaCodec` surface rendering without user intervention.
