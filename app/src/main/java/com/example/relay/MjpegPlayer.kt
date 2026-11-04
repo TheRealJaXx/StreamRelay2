@@ -101,7 +101,7 @@ class MjpegPlayer(
     private var lastDecodedWidth = 0
     private var lastDecodedHeight = 0
     private val bitmapOptions = BitmapFactory.Options().apply {
-        inPreferredConfig = Bitmap.Config.RGB_565
+        inPreferredConfig = Bitmap.Config.ARGB_8888
         inMutable = true
     }
 
@@ -226,7 +226,7 @@ class MjpegPlayer(
             val h = probeOpts.outHeight
             if (w > 0 && h > 0) {
                 targetBitmap?.recycle()
-                targetBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565)
+                targetBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
                 reusableBitmap = targetBitmap
                 lastDecodedWidth = w
                 lastDecodedHeight = h
@@ -262,7 +262,7 @@ class MjpegPlayer(
 
         // Fallback without inBitmap if needed
         if (decoded == null) {
-            val fallbackOpts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+            val fallbackOpts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
             decoded = try {
                 BitmapFactory.decodeByteArray(frame.buffer, 0, frame.length, fallbackOpts)
             } catch (e: Exception) {
@@ -331,7 +331,7 @@ class MjpegPlayer(
             } else {
                 // Publish a safe immutable copy to Compose StateFlow ONLY when no surface is attached
                 try {
-                    _currentBitmap.value = decoded.copy(decoded.config ?: Bitmap.Config.RGB_565, false)
+                    _currentBitmap.value = decoded.copy(decoded.config ?: Bitmap.Config.ARGB_8888, false)
                 } catch (_: Exception) {}
             }
 

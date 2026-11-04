@@ -1,6 +1,6 @@
 {
-  "summary":  "Comprehensive architectural plan for screen-lock background streaming survival, sequenced custom UDP transport, and hardware H.264/HEVC video encoding.",
-  "updatedAt":  "2026-10-25T13:26:07.838999619Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Documentation of RX Image Quality Fixes & MJPEG Passthrough Diagnostics Implementation in StreamRelay2.",
+  "updatedAt": "2026-11-04T06:17:07.237847325Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

@@ -346,34 +346,50 @@ fun RxScreen(
                                 )
                             }
 
-                            // Line 4: Audio Mute & Codec Info
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .clickable { viewModel.setRxMuted(!isRxMuted) }
-                                ) {
-                                    Text(
-                                        text = if (isRxMuted) "Audio: MUTED" else if (isAudioPlaying) "Audio: LIVE" else "Audio: Wait",
-                                        color = if (isRxMuted) Color(0xFFF87171) else if (isAudioPlaying) Color(0xFF34D399) else Color(0xFF94A3B8),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
+                            // Line 4: Prominent Active Codec Banner & Resolution
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
                                 Text(
-                                    text = "Codec: ${stats.videoCodec}",
-                                    color = if (stats.videoCodec == "H.264") Color(0xFF34D399) else Color(0xFF38BDF8),
+                                    text = "ACTIVE CODEC: ${stats.videoCodec.uppercase()}",
+                                    color = if (stats.videoCodec.contains("H.264")) Color(0xFFFBBF24) else Color(0xFF34D399),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.Bold
+                                    fontWeight = FontWeight.ExtraBold
                                 )
                                 Text(
                                     text = "Res: ${stats.decodedBitmapSize}",
                                     color = Color(0xFF38BDF8),
                                     style = MaterialTheme.typography.labelSmall,
                                     fontFamily = FontFamily.Monospace
+                                )
+                            }
+
+                            if (stats.videoCodec.contains("H.264")) {
+                                Text(
+                                    text = "Re-encoded from decoded frames at 4 Mbps - lower quality than MJPEG",
+                                    color = Color(0xFFFDE68A),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+
+                            // Line 5: Audio Mute & State
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .clickable { viewModel.setRxMuted(!isRxMuted) }
+                            ) {
+                                Text(
+                                    text = if (isRxMuted) "Audio: MUTED (tap to unmute)" else if (isAudioPlaying) "Audio: LIVE (tap to mute)" else "Audio: Wait",
+                                    color = if (isRxMuted) Color(0xFFF87171) else if (isAudioPlaying) Color(0xFF34D399) else Color(0xFF94A3B8),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
 

@@ -66,7 +66,7 @@ data class RxStats(
     val audioUnderrunCount: Int = 0,
     val frameSizeBytes: Int = 0,
     val statusDetail: String = "Disconnected",
-    val videoCodec: String = "MJPEG"
+    val videoCodec: String = "MJPEG passthrough"
 )
 
 class RelayClient(
@@ -189,7 +189,7 @@ class RelayClient(
     // Surface & Hardware H.264 Decoder
     private var attachedSurfaceHolder: SurfaceHolder? = null
     private var h264Decoder: HardwareH264Decoder? = null
-    private var activeVideoCodec = "MJPEG"
+    private var activeVideoCodec = "MJPEG passthrough"
     private var h264FrameCountInSecond = 0
     private var h264Fps = 0f
     private var lastH264FpsCalcTime = SystemClock.elapsedRealtime()
@@ -198,7 +198,7 @@ class RelayClient(
     fun attachSurface(holder: SurfaceHolder) {
         attachedSurfaceHolder = holder
         mjpegPlayer.attachSurface(holder)
-        if (activeVideoCodec == "H.264" && holder.surface.isValid) {
+        if (activeVideoCodec.contains("H.264") && holder.surface.isValid) {
             try {
                 h264Decoder?.release()
                 h264Decoder = HardwareH264Decoder(1280, 720, holder.surface).also { it.start() }
@@ -334,7 +334,7 @@ class RelayClient(
                     lastVideoPacketTimestamp = SystemClock.elapsedRealtime()
 
                     if (flags == 1) {
-                        activeVideoCodec = "H.264"
+                        activeVideoCodec = "H.264 re-encoded"
                         h264FrameCountInSecond++
                         lastH264FrameSizeBytes = length
                         val nal = ByteArray(length)
@@ -353,7 +353,7 @@ class RelayClient(
                             h264Decoder?.decodeNal(nal)
                         }
                     } else {
-                        activeVideoCodec = "MJPEG"
+                        activeVideoCodec = "MJPEG passthrough"
                         if (h264Decoder != null) {
                             try { h264Decoder?.release() } catch (_: Exception) {}
                             h264Decoder = null

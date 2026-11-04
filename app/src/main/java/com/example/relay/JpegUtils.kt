@@ -11,15 +11,15 @@ object JpegUtils {
      * Extracts clean JPEG bytes starting at SOI (0xFF, 0xD8) and ending at EOI (0xFF, 0xD9).
      * Eliminates trailing uninitialized buffer bytes (such as 1.7MB padding from camera buffer).
      */
-    fun extractCleanJpeg(data: ByteArray): ByteArray {
-        val size = data.size
-        if (size < 4) return data
+    fun extractCleanJpeg(data: ByteArray, length: Int = data.size): ByteArray {
+        val size = minOf(data.size, length)
+        if (size < 4) return if (size == data.size) data else data.copyOf(size)
 
         // Check if data is already a clean JPEG (starts with SOI and ends with EOI)
         val isCleanStart = (data[0].toInt() and 0xFF) == 0xFF && (data[1].toInt() and 0xFF) == 0xD8
         val isCleanEnd = (data[size - 2].toInt() and 0xFF) == 0xFF && (data[size - 1].toInt() and 0xFF) == 0xD9
         if (isCleanStart && isCleanEnd) {
-            return data
+            return if (size == data.size) data else data.copyOf(size)
         }
 
         // 1. Locate Start Of Image (SOI): 0xFF, 0xD8
@@ -32,7 +32,7 @@ object JpegUtils {
         }
 
         if (startIndex == -1) {
-            return data
+            return if (size == data.size) data else data.copyOf(size)
         }
 
         // 2. Walk JPEG markers to find Start Of Scan (SOS: 0xFF, 0xDA)
@@ -96,7 +96,7 @@ object JpegUtils {
         return if (endIndex > startIndex) {
             data.copyOfRange(startIndex, endIndex)
         } else {
-            data
+            if (size == data.size) data else data.copyOf(size)
         }
     }
 

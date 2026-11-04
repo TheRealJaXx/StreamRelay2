@@ -49,6 +49,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -195,6 +196,49 @@ fun TxScreen(
                     connectedClients = connectedClients,
                     onEditPort = { showPortDialog = true }
                 )
+            }
+
+            // Hardware format check: show visible warning if not MJPEG
+            if (telemetry.isStreaming && !telemetry.bufferFormat.contains("MJPEG", ignoreCase = true)) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color(0xFF7F1D1D).copy(alpha = 0.9f)
+                        ),
+                        border = BorderStroke(1.5.dp, Color(0xFFEF4444))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = "Warning",
+                                tint = Color(0xFFFCA5A5),
+                                modifier = Modifier.size(32.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Card is not sending MJPEG - frames are being re-encoded (quality loss)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Negotiated hardware format: ${telemetry.bufferFormat}. Non-MJPEG mode requires local JPEG compression.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFFFECACA)
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // Screen-Lock Background Status & Video Codec Configuration
@@ -564,7 +608,7 @@ private fun TxTelemetryCard(
                 MetricTile(
                     label = "Resolution",
                     value = if (telemetry.resolutionWidth > 0) "${telemetry.resolutionWidth}x${telemetry.resolutionHeight}" else "720p",
-                    unit = "MJPEG",
+                    unit = telemetry.bufferFormat,
                     highlight = telemetry.resolutionWidth > 0,
                     modifier = Modifier.weight(1f)
                 )
@@ -890,6 +934,46 @@ private fun TxRelayDiagnosticsCard(
                 }
             }
 
+            // Prominent Active Codec Banner
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                color = if (txStats.activeCodec.contains("H.264")) Color(0xFF78350F).copy(alpha = 0.35f) else Color(0xFF065F46).copy(alpha = 0.35f),
+                border = BorderStroke(1.5.dp, if (txStats.activeCodec.contains("H.264")) Color(0xFFF59E0B) else Color(0xFF10B981))
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "ACTIVE CODEC: ${txStats.activeCodec.uppercase()}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (txStats.activeCodec.contains("H.264")) Color(0xFFFBBF24) else Color(0xFF34D399)
+                        )
+                        Text(
+                            text = "TCP Relay",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (txStats.activeCodec.contains("H.264")) {
+                        Text(
+                            text = "Re-encoded from decoded frames at 4 Mbps - lower quality than MJPEG",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFFDE68A),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
             // Monospace diagnostics lines (Requirement E)
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -901,9 +985,12 @@ private fun TxRelayDiagnosticsCard(
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
+                    val totalFrames = txStats.passthroughFrames + txStats.reEncodedFrames
+                    val passthroughPct = if (totalFrames > 0L) (txStats.passthroughFrames * 100 / totalFrames) else 100L
+
                     Text(
-                        text = "Active Video Codec: ${txStats.activeCodec} over TCP",
-                        color = Color(0xFFFBBF24),
+                        text = "MJPEG Passthrough: ${txStats.passthroughFrames} ($passthroughPct%)  |  Re-encoded: ${txStats.reEncodedFrames}",
+                        color = if (txStats.reEncodedFrames > 0L) Color(0xFFFBBF24) else Color(0xFF34D399),
                         style = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold

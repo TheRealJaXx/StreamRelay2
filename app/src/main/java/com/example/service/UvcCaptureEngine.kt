@@ -84,6 +84,14 @@ class UvcCaptureEngine(
                (size.type != 4 && size.type != 5 && size.type != 0)
     }
 
+    private fun getNegotiatedFormatName(type: Int): String {
+        return when (type) {
+            UVCCamera.UVC_VS_FRAME_MJPEG, UVCCamera.UVC_VS_FORMAT_MJPEG, UVCCamera.FRAME_FORMAT_MJPEG, 6, 7, 1 -> "MJPEG"
+            UVCCamera.UVC_VS_FRAME_UNCOMPRESSED, UVCCamera.UVC_VS_FORMAT_UNCOMPRESSED, UVCCamera.FRAME_FORMAT_YUYV, 0, 4, 5 -> "YUY2/Uncompressed"
+            else -> if (isMjpeg(Size(type, 0, 0, 0, null))) "MJPEG" else "Uncompressed ($type)"
+        }
+    }
+
     fun setStreamPreset(preset: StreamPreset) {
         selectedPreset = preset
         onLog("UVC", "Selected resolution: ${preset.width}x${preset.height} @ ${preset.targetFps}fps (Strictly MJPEG)", false)
@@ -137,15 +145,22 @@ class UvcCaptureEngine(
         try {
             cameraHelper.setPreviewSize(targetSize)
             val active = cameraHelper.previewSize ?: targetSize
+            val formatName = getNegotiatedFormatName(active.type)
+            val isMjpegNegotiated = formatName == "MJPEG"
+
             _telemetry.value = _telemetry.value.copy(
                 resolutionWidth = active.width,
                 resolutionHeight = active.height,
                 requestedFps = targetFps,
                 negotiatedFps = active.fps,
                 fpsNotice = notice,
-                bufferFormat = "MJPEG"
+                bufferFormat = formatName
             )
-            onLog("UVC", "Hardware stream negotiated: ${active.width}x${active.height} @ ${active.fps}fps MJPEG", false)
+            onLog(
+                "UVC",
+                "Hardware stream negotiated: ${active.width}x${active.height} @ ${active.fps}fps type=${active.type} ($formatName)",
+                !isMjpegNegotiated
+            )
         } catch (e: Exception) {
             onLog("UVC", "Error applying MJPEG resolution: ${e.message}", true)
         }
@@ -209,13 +224,14 @@ class UvcCaptureEngine(
                 val activeSize = cameraHelper.previewSize
                 val width = activeSize?.width ?: selectedPreset.width
                 val height = activeSize?.height ?: selectedPreset.height
+                val formatName = getNegotiatedFormatName(activeSize?.type ?: selectedPreset.targetFps)
 
                 _telemetry.value = _telemetry.value.copy(
                     isStreaming = true,
                     cameraName = device.productName ?: "USB Video",
                     resolutionWidth = width,
                     resolutionHeight = height,
-                    bufferFormat = "MJPEG",
+                    bufferFormat = formatName,
                     errorMessage = null
                 )
 
@@ -239,6 +255,7 @@ class UvcCaptureEngine(
 
                             val durationSec = (now - sessionStartTime) / 1000L
                             val currentSize = cameraHelper.previewSize
+                            val activeFormat = getNegotiatedFormatName(currentSize?.type ?: activeSize?.type ?: -1)
 
                             _telemetry.value = _telemetry.value.copy(
                                 isStreaming = true,
@@ -246,7 +263,7 @@ class UvcCaptureEngine(
                                 totalFrames = totalFramesCounter,
                                 resolutionWidth = currentSize?.width ?: width,
                                 resolutionHeight = currentSize?.height ?: height,
-                                bufferFormat = "MJPEG",
+                                bufferFormat = activeFormat,
                                 lastFrameTimeMs = now,
                                 lastFrameSizeBytes = sizeBytes,
                                 streamDurationSeconds = durationSec

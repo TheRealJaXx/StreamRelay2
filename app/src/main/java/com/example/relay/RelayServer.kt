@@ -39,7 +39,9 @@ data class TxRelayStats(
     val connectedClientsCount: Int = 0,
     val audioChunksCaptured: Long = 0L,
     val audioChunksSent: Long = 0L,
-    val activeCodec: String = "MJPEG"
+    val activeCodec: String = "MJPEG passthrough",
+    val passthroughFrames: Long = 0L,
+    val reEncodedFrames: Long = 0L
 )
 
 class RelayServer(
@@ -124,6 +126,8 @@ class RelayServer(
     private var framesDroppedCount = 0L
     private var audioCapturedCount = 0L
     private var audioSentCount = 0L
+    private var passthroughFramesCount = 0L
+    private var reEncodedFramesCount = 0L
 
     private var lastFrameSize = 0
     private var lastFlags = 0
@@ -437,6 +441,16 @@ class RelayServer(
         maybeUpdateStats()
     }
 
+    fun recordPassthroughFrame() {
+        passthroughFramesCount++
+        maybeUpdateStats()
+    }
+
+    fun recordReEncodedFrame() {
+        reEncodedFramesCount++
+        maybeUpdateStats()
+    }
+
     fun submitFrame(
         frameBytes: ByteArray,
         size: Int = frameBytes.size,
@@ -505,7 +519,9 @@ class RelayServer(
                 connectedClientsCount = if (isConn) 1 else 0,
                 audioChunksCaptured = audioCapturedCount,
                 audioChunksSent = audioSentCount,
-                activeCodec = if (lastFlags == 1) "H.264" else "MJPEG"
+                activeCodec = if (lastFlags == 1) "H.264 re-encoded" else "MJPEG passthrough",
+                passthroughFrames = passthroughFramesCount,
+                reEncodedFrames = reEncodedFramesCount
             )
         }
     }

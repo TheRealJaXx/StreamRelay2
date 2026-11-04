@@ -51,8 +51,8 @@ enum class RoundTripSource {
 }
 
 enum class VideoCodec(val label: String, val description: String) {
-    MJPEG("MJPEG (Direct Frames)", "Full resolution, uncompressed JPEG stream (30-40 Mbps)"),
-    H264("H.264 (Hardware AVC)", "Hardware encoded, 85% lower bandwidth (3-5 Mbps), less heating")
+    MJPEG("MJPEG passthrough", "Direct capture card JPEG stream with zero quality loss"),
+    H264("H.264 re-encoded", "Re-encoded from decoded frames at 4 Mbps - lower quality than MJPEG")
 }
 
 class CaptureViewModel(application: Application) : AndroidViewModel(application) {
@@ -296,14 +296,32 @@ class CaptureViewModel(application: Application) : AndroidViewModel(application)
                 releaseAction()
             } else {
                 if (isJpeg) {
-                    relayServer.submitFrame(rawBytes, sizeBytes, flags = 0, onWritten = releaseAction)
+                    val endsWithEoi = sizeBytes >= 2 &&
+                        (rawBytes[sizeBytes - 2].toInt() and 0xFF) == 0xFF &&
+                        (rawBytes[sizeBytes - 1].toInt() and 0xFF) == 0xD9
+
+                    val frameToSend: ByteArray
+                    val frameSizeToSend: Int
+
+                    if (endsWithEoi) {
+                        frameToSend = rawBytes
+                        frameSizeToSend = sizeBytes
+                    } else {
+                        val clean = JpegUtils.extractCleanJpeg(rawBytes, sizeBytes)
+                        frameToSend = clean
+                        frameSizeToSend = clean.size
+                    }
+
+                    relayServer.recordPassthroughFrame()
+                    relayServer.submitFrame(frameToSend, frameSizeToSend, flags = 0, onWritten = releaseAction)
                 } else {
                     val telem = telemetry.value
                     val w = if (telem.resolutionWidth > 0) telem.resolutionWidth else 1280
                     val h = if (telem.resolutionHeight > 0) telem.resolutionHeight else 720
-                    val compressed = JpegUtils.compressYuvToJpeg(rawBytes.copyOf(sizeBytes), w, h, quality = 80)
+                    val compressed = JpegUtils.compressYuvToJpeg(rawBytes.copyOf(sizeBytes), w, h, quality = 95)
                     releaseAction()
                     if (compressed != null) {
+                        relayServer.recordReEncodedFrame()
                         relayServer.submitFrame(compressed, compressed.size, flags = 0)
                     }
                 }
